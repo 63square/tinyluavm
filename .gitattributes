@@ -1,0 +1,6 @@
+# Pin line endings so checked-out file sizes match the documented byte
+# counts (1713 bytes for src/tinyvm.luau, etc.) regardless of platform.
+*.luau text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.bin  binary
