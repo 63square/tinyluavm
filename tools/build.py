@@ -26,13 +26,11 @@ def build_macro_bin() -> bytes:
     print(f"  macrovm.bin: {len(data)} bytes")
     return data
 
-def predecode(rewrite_ops: bool, fold_bool: bool, force_gfor3: bool=False, split_assign: bool=False) -> pathlib.Path:
+def predecode(for_micro: bool = True) -> pathlib.Path:
     out = BUILD / "macrovm-ast.luau"
     args = [sys.executable, str(PREDEC), str(BUILD/"macrovm.bin"), str(out)]
-    if rewrite_ops: args.append("--rewrite-ops")
-    if fold_bool:   args.append("--fold-bool")
-    if force_gfor3: args.append("--force-gfor3")
-    if split_assign: args.append("--split-assign")
+    if for_micro:
+        args.append("--for-micro")
     subprocess.check_call(args)
     return out
 
@@ -56,14 +54,15 @@ def main():
     args = ap.parse_args()
     print("Building tinyvm artifacts...")
     build_macro_bin()
-    predecode(rewrite_ops=True, fold_bool=True, force_gfor3=True, split_assign=True)
+    predecode(for_micro=True)
     micro = (SRC / "tinyvm.luau").read_text(encoding="latin-1").rstrip("\n")
-    # The AST module is self-contained: it returns a {K, F} table and binds its
-    # own `tp` / `tu` for the baked closures. We inline its body as an IIFE so
-    # the bundle is still a single file.
+    # The AST module is pure data: just a `return {K, F}` table expression.
+    # Strip the `--!nocheck\n` and `return ` prefixes and inline directly.
     ast_src = (BUILD / "macrovm-ast.luau").read_text(encoding="latin-1")
     if ast_src.startswith("--!nocheck\n"):
         ast_src = ast_src[len("--!nocheck\n"):]
+    if ast_src.startswith("return "):
+        ast_src = ast_src[len("return "):]
     ast_src = ast_src.rstrip("\n")
     out = BUILD / "tinyvm-bundled.luau"
     # Shadow env wraps the user env so macro-VM globals (string.byte, table.pack,
@@ -74,7 +73,7 @@ def main():
         "local tp,tu=table.pack,table.unpack\n"
         + OP_SETUP +
         "local _mvm=(function()\n" + micro + "\nend)()\n"
-        "local _ast=(function()\n" + ast_src + "\nend)()\n"
+        f"local _ast={ast_src}\n"
         "local _K,_F=_ast[1],_ast[2]\n"
         "return function(b,e,...) return _mvm(_K,_F,_E(e),tp,tu,b,e,...) end\n",
         encoding="latin-1", newline="",

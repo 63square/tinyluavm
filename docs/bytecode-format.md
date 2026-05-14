@@ -146,37 +146,71 @@ sets `multret = 0` for parenthesized calls and `multret = 1` everywhere
 else; the runtime then truncates further in single-value contexts.
 
 
-## Predecoder rewrites (what the micro-VM actually sees)
+## Predecoder rewrites
 
 The macro-VM source `src/macrovm.luau` is compiled to wire format
-(`build/macrovm.bin`), then `tools/predecode.py` rewrites it into a
-Lua expression `(K, F)` saved at `build/macrovm-ast.luau`. The
-following rewrites are applied (each is optional but all are enabled
-by `tools/build.py`):
+(`build/macrovm.bin`), then `tools/predecode.py` converts it into a
+Luau module (or a JSON document, with `--json`) of shape `[K, F]`.
 
-### `--fold-bool`: Nil/True/False → Const
+The predecoder has a single switch, `--for-micro`, that controls
+whether the **micro-VM-only atom rewrites** are applied. When omitted,
+only the wire-format → AST conversion happens; the output is consumable
+by the macro-VM at runtime (this is how user programs are pre-decoded).
+When set, the micro-VM-specific rewrites listed below are applied; the
+output is consumable only by the micro-VM.
+
+`tools/build.py` invokes the predecoder with `--for-micro` on
+`build/macrovm.bin` to produce `build/macrovm-ast.luau`.
+
+### Function record shape
+
+Each function record is converted to a JSON-friendly object:
+
+```json
+{"np": <int>, "va": <int>, "L": [[<kind>, <idx>], ...], "b": <atom>}
+```
+
+* `np` — number of declared parameters.
+* `va` — vararg flag (0 or 1).
+* `L` — upvalue source list. With `--for-micro`, the `kind` element is
+  `"S"` (parent local stack) or `"U"` (parent upvalues), matching the
+  unified Local/Upval atom. Without `--for-micro`, it's the raw integer
+  kind that `src/macrovm.luau` consumes: `0` (parent local) or `1`
+  (parent upvalue).
+* `b` — body atom (always a Block atom, tag 50).
+
+### Rewrites that are always on
+
+Even without `--for-micro`, the predecoder converts the wire format
+into the JSON-friendly object/array form described above. It does
+**not** modify atom contents.
+
+### Rewrites added by `--for-micro`
+
+These are the byte-saving rewrites that target the micro-VM's reduced
+atom set. They are *not* safe for the macro-VM (the macro-VM's source
+doesn't have handlers for the new atom shapes), so they're only
+applied when predecoding the macro-VM itself for direct consumption
+by the micro-VM.
+
+#### Nil/True/False → Const
 
 The atoms `[1]` (Nil), `[2]` (True), `[3]` (False) become `[4, idx]`
 where `K[idx]` holds `nil` / `true` / `false`. The predecoder appends
 those three values to K.
 
-The micro-VM has **no** handlers for tags 1, 2, 3 — they no longer
-appear after this pass.
-
-### `--rewrite-ops`: BinOp/UnOp → Call
+#### BinOp/UnOp → Call
 
 Each `[14, opCode, a, b]` becomes `[10, [8, B_idx], [a, b], 1]`,
-a Call atom whose function is the global `B<opCode>` (one of `B1`..`B14`)
-applied to `(a, b)` with multret 1. Similarly `[15, opCode, a]`
-becomes a Call of `U<opCode>` (`U1`..`U3`) on `(a)`.
+a Call atom whose function is the global `B<opCode>` (one of
+`B1`..`B14`) applied to `(a, b)` with multret 1. Similarly
+`[15, opCode, a]` becomes a Call of `U<opCode>` (`U1`..`U3`) on `(a)`.
 
 The predecoder appends 17 string constants to K: `"B1"`..`"B14"`,
 `"U1"`..`"U3"`. The caller-provided env must expose those names as
 functions; the bundle's `_E(u)` helper does this automatically.
 
-The micro-VM has **no** handlers for tags 14 or 15.
-
-### Local/Upval unify
+#### Local/Upval unify
 
 Local atoms `[6, slot]` become `[6, "S", slot]`; Upval atoms
 `[7, slot]` become `[6, "U", slot]`. The shared handler is:
@@ -189,9 +223,7 @@ where `k` is the storage marker (`"S"` or `"U"`) and `m` is the slot
 index. `fr.S` and `fr.U` are the per-frame local-stack and upvalue
 tables respectively, so `fr["S"]` and `fr["U"]` resolve correctly.
 
-The micro-VM has **no** handler for tag 7.
-
-### `--force-gfor3`: GenericFor 3-source form + 2-slot flatten
+#### GenericFor 3-source + 2-slot flatten
 
 Atom `[36, slots, [singleSrc], body]` becomes
 `[36, slots, [Global("next"), singleSrc, Const(nil)], body]`. This
@@ -199,14 +231,20 @@ removes the need for the micro-VM to special-case `for k,v in tbl do`
 (where `tbl` is iterated via the `__iter` metamethod or fallback
 `next` semantics).
 
-The predecoder appends `"next"` to K.
-
 Additionally, if `slots` has exactly 2 entries (the common case for
 `for k, v in ...`), they're hoisted into the atom directly:
 `[36, s1, s2, sources, body]` (5 elements instead of 4 with a
 sublist).
 
-### NumericFor step drop
+This rewrite is **not** safe for user code: user programs commonly do
+`for k, v in pairs(t) do` where `pairs(t)` is a single Call atom that
+already returns 3 values via multret. Wrapping it as
+`[Global("next"), call, nil]` would treat only the first return of
+the call (the actual iterator function) as the iterator state and
+break iteration. The macro-VM's native generic-for handler expands
+multret correctly.
+
+#### NumericFor step drop
 
 `[35, slot, from, to, None, body]` (NumericFor without step) becomes
 `[35, slot, from, to, body]` (no step slot). All NumericFors in the
@@ -215,7 +253,7 @@ macro-VM source use step = 1.
 The micro-VM's handler is simply `for j = z(h, fr), z(u, fr) do ...`
 — no step variable, no NaN guard, no direction selection.
 
-### If flatten
+#### If flatten
 
 `[32, c0, t0, elseifs, else]` becomes
 `[32, [[c0, t0]] ++ elseifs, else]`. The main cond/then are folded
@@ -234,7 +272,7 @@ end
 
 Layout: `it[2]` = pair list, `it[3]` = else block.
 
-### `--split-assign`: Assign by target kind
+#### Assign by target kind
 
 Single-target `[30, [target], [value]]` becomes:
 
@@ -249,29 +287,6 @@ Multi-target Assign (only used in 1 place in the macro-VM, and only
 with all-local targets) becomes `[30, [slot1, slot2, ...], values]`
 — the targets list is flattened from atoms to slot ints.
 
-### Function bake
-
-Each function record `{np, va, L, b}` is replaced with a Lua source
-string for a closure-builder:
-
-```lua
-function(pa, J)
-  local lr = {pa.S[3], pa.U[1], ...}      -- one entry per upvalue
-  return function(...)
-    local fr = {S = {}, U = lr, V = tp(select(NP+1, ...))}
-    for i = 1, NP do fr.S[i] = {(select(i, ...))} end
-    local r = J(BODY_TREE, fr)
-    if r then return tu(r, 1, r.n) end
-  end
-end
-```
-
-`tp` and `tu` are captured from the bundle's enclosing scope (they're
-local to the bundle, not stdlib globals).
-
-The body tree (`BODY_TREE`) is emitted as a literal Lua table
-expression matching the atom shape.
-
 ## Atoms the micro-VM handles
 
 After all rewrites, the micro-VM dispatches on this reduced atom set:
@@ -285,7 +300,7 @@ After all rewrites, the micro-VM dispatches on this reduced atom set:
 | 8   | Global                                   | `return E[K[k]]`                       |
 | 9   | Index                                    | `return z(k, fr)[z(m, fr)]`            |
 | 10  | Call (single-value context)              | `return P(n, fr)[1]`                   |
-| 12  | Closure                                  | `return F[k](fr, J)`                   |
+| 12  | Closure                                  | `return Q(k, fr)`                      |
 | 13  | Table constructor                        | array via `M`, then hash entries       |
 | 16  | And                                      | `return z(k,fr) and z(m,fr)`           |
 | 17  | Or                                       | `return z(k,fr) or z(m,fr)`            |
@@ -329,9 +344,50 @@ implements them when interpreting user bytecode.
   declaration in source allocates a fresh slot. This makes closures
   that capture a loop-iteration variable see *that iteration's* boxed
   cell, matching Luau's `local`-per-iteration semantics.
-* Upvalues are resolved at compile time. Each function's upvalue list
-  is baked into a Lua expression `{pa.S[3], pa.U[1], ...}` by the
-  predecoder, evaluated once at closure-build time.
+* Upvalues are resolved at compile time. Each function record's `L`
+  field describes how the closure should capture its upvalues from the
+  enclosing frame: a list of `[storage_marker, slot_index]` pairs.
+  At closure-build time, `Q(ix, pa)` iterates `L` and reads each
+  source from the parent frame.
 * Free identifiers compile to `Global` atoms (tag 8); they read/write
   the caller-provided environment table by name. Writes go through
   the micro-VM's `t == 22` handler.
+
+
+## JSON form
+
+`tools/predecode.py --json` emits a pure JSON document instead of a
+Luau module. The top-level shape is:
+
+```json
+[
+  [<K entries>],
+  [<F entries>]
+]
+```
+
+Mappings:
+
+| Python (predecoder) | JSON              | Luau (after decode) |
+|---------------------|-------------------|---------------------|
+| `None`              | `null`            | `nil`               |
+| `True` / `False`    | `true` / `false`  | `true` / `false`    |
+| `int`               | integer number    | `number`            |
+| `float`             | number            | `number`            |
+| `str`               | string            | `string`            |
+| `list`              | array             | array-indexed table |
+| `dict`              | object            | string-keyed table  |
+
+Function records use object form with `np`, `va`, `L`, `b` keys.
+Atom trees use array form with the tag as the first element.
+
+Any standard JSON decoder that maps `null → nil` and represents
+arrays as 1-indexed Lua tables (which is the conventional behavior
+of every Roblox-compatible JSON library, plus the small parser
+shipped in `examples/json-deploy/jsondec.luau`) will produce a
+structure the micro-VM consumes directly.
+
+Note: nested `null` values inside JSON arrays correspond to `nil`
+holes in Lua tables. The micro-VM always indexes these tables by
+explicit integer position (it never uses `#` or `ipairs` over a
+holed array), so the holes are inert.

@@ -174,66 +174,79 @@ def count_tags(F):
         walk(tr['b'], visit)
     return c
 
-def rewrite(K, F, *, fold_bool=False, rewrite_ops=False, force_gfor3=False, split_assign=False):
+def rewrite(K, F, *, for_micro=False):
+    """Apply rewrites to the AST.
+
+    When `for_micro` is False, only the rewrites that the macro-VM can also
+    handle natively (in source) are applied. This keeps the output consumable
+    by the macro-VM when used for pre-decoded user programs.
+
+    When `for_micro` is True, additionally apply the micro-VM-specific atom
+    rewrites that shrink the micro-VM source: Local/Upval unify, If flatten,
+    NumericFor step drop, GenericFor 2-slot flatten, Assign split.
+    """
     new_consts = []
     def add_const(v):
         new_consts.append(v)
         return len(K) + len(new_consts)
 
+    # All the rewrites are micro-VM-only. The macro-VM handles the original
+    # atom set natively (Nil/True/False/BinOp/UnOp/GenericFor with __iter
+    # fallback), so when we're predecoding USER code (for_micro=False) we
+    # leave it alone and only convert the wire format to JSON-friendly tables.
     nil_idx = true_idx = false_idx = None
-    if fold_bool or force_gfor3:
-        nil_idx = add_const(None)
-    if fold_bool:
-        true_idx = add_const(True)
-        false_idx = add_const(False)
-    binop_base = unop_base = None
-    if rewrite_ops:
-        binop_base = len(K) + len(new_consts) + 1
-        for i in range(1,15): add_const(f"B{i}")
-        unop_base = len(K) + len(new_consts) + 1
-        for i in range(1,4):  add_const(f"U{i}")
-    next_name_idx = None
-    if force_gfor3:
+    binop_base = unop_base = next_name_idx = None
+    if for_micro:
+        nil_idx       = add_const(None)
+        true_idx      = add_const(True)
+        false_idx     = add_const(False)
+        binop_base    = len(K) + len(new_consts) + 1
+        for i in range(1, 15): add_const(f"B{i}")
+        unop_base     = len(K) + len(new_consts) + 1
+        for i in range(1, 4):  add_const(f"U{i}")
         next_name_idx = add_const("next")
 
     def fn(atom):
         if not isinstance(atom, list) or not atom: return atom
+        if not for_micro: return atom
         t = atom[0]
-        if fold_bool:
-            if t == 1: return [4, nil_idx]
-            if t == 2: return [4, true_idx]
-            if t == 3: return [4, false_idx]
-        if rewrite_ops:
-            if t == 14:
-                return [10, [8, binop_base + atom[1] - 1], [atom[2], atom[3]], 1]
-            if t == 15:
-                return [10, [8, unop_base + atom[1] - 1], [atom[2]], 1]
-        # Unify Local(t=6) and Upval(t=7) into a single tag 6 with storage selector "S"/"U".
-        # New shape: [6, storage_key, slot]
+        # Fold Nil/True/False to Const refs (saves three branches in the micro-VM)
+        if t == 1: return [4, nil_idx]
+        if t == 2: return [4, true_idx]
+        if t == 3: return [4, false_idx]
+        # Rewrite BinOp/UnOp atoms as Call atoms targeting env-supplied helpers.
+        if t == 14:
+            return [10, [8, binop_base + atom[1] - 1], [atom[2], atom[3]], 1]
+        if t == 15:
+            return [10, [8, unop_base + atom[1] - 1], [atom[2]], 1]
+        # GenericFor: force 3-source form and flatten the 2-slot variant.
+        # Only safe in `for_micro` mode -- user code may pass `pairs(t)` which
+        # is a single Call atom returning 3 values via multret expansion; we
+        # must not wrap it in [Global("next"), src, nil] as that would treat
+        # the call's first return value as the entire iterator.
+        if t == 36:
+            slots, vals, body = atom[1], atom[2], atom[3]
+            if len(vals) == 1:
+                vals = [[8, next_name_idx], vals[0], [4, nil_idx]]
+            if len(slots) == 2:
+                return [36, slots[0], slots[1], vals, body]
+            return [36, slots, vals, body]
+        # Local/Upval unify
         if t == 6:
             return [6, Raw('"S"'), atom[1]]
         if t == 7:
             return [6, Raw('"U"'), atom[1]]
-        if force_gfor3 and t == 36:
-            slots, vals, body = atom[1], atom[2], atom[3]
-            if len(vals) == 1:
-                vals = [[8, next_name_idx], vals[0], [4, nil_idx]]
-            # Flatten 2-slot to direct: [36, s1, s2, sources, body]
-            if len(slots) == 2:
-                return [36, slots[0], slots[1], vals, body]
-            return [36, slots, vals, body]
+        # NumericFor step drop (when step is None)
         if t == 35 and atom[4] is None:
-            # Drop step slot: [35, slot, from, to, None, body] -> [35, slot, from, to, body]
             return [35, atom[1], atom[2], atom[3], atom[5]]
+        # If flatten: prepend (cond0, then0) to elseifs list
         if t == 32:
-            # Flatten: [32, c0, t0, [(c1,t1), (c2,t2)], else] -> [32, [(c0,t0),(c1,t1),(c2,t2)], else]
             c0, t0, elifs, el = atom[1], atom[2], atom[3], atom[4]
-            branches = [[c0, t0]] + elifs
-            return [32, branches, el]
-        if split_assign and t == 30:
+            return [32, [[c0, t0]] + elifs, el]
+        # Single-target Assign split
+        if t == 30:
             targets, values = atom[1], atom[2]
             def is_local(g):
-                # After unify, both old Local(t=6) and Upval(t=7) become tag 6 with storage marker.
                 return g[0] == 6 and isinstance(g[1], Raw) and g[1].s == '"S"'
             def is_upval(g):
                 return g[0] == 6 and isinstance(g[1], Raw) and g[1].s == '"U"'
@@ -243,9 +256,9 @@ def rewrite(K, F, *, fold_bool=False, rewrite_ops=False, force_gfor3=False, spli
                     return [20, Raw('"S"'), g[2], v]
                 if is_upval(g):
                     return [20, Raw('"U"'), g[2], v]
-                if g[0] == 8:   # Global
+                if g[0] == 8:
                     return [22, g[1], v]
-                if g[0] == 9:   # Index
+                if g[0] == 9:
                     return [23, g[1], g[2], v]
             if all(is_local(g) for g in targets):
                 slots = [g[2] for g in targets]
@@ -309,11 +322,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("input")
     ap.add_argument("output")
-    ap.add_argument("--rewrite-ops", action="store_true")
-    ap.add_argument("--fold-bool", action="store_true")
-    ap.add_argument("--force-gfor3", action="store_true")
-    ap.add_argument("--split-assign", action="store_true")
+    ap.add_argument("--for-micro", action="store_true",
+                    help="apply the micro-VM-specific atom rewrites "
+                         "(use when predecoding the macro-VM itself, not "
+                         "user programs)")
     ap.add_argument("--census", action="store_true")
+    ap.add_argument("--json", action="store_true",
+                    help="emit pure JSON instead of a Luau module")
     args = ap.parse_args()
 
     data = pathlib.Path(args.input).read_bytes()
@@ -322,54 +337,52 @@ def main():
         cnt = count_tags(F)
         for tag, n in sorted(cnt.items()): print(f"  tag {tag}: {n}")
         return
-    K, F = rewrite(K, F, fold_bool=args.fold_bool, rewrite_ops=args.rewrite_ops, force_gfor3=args.force_gfor3, split_assign=args.split_assign)
-    # Bake the entire function (upval setup + frame setup + body call) as a closure.
-    # Signature: function(pa,J,tp,tu) -> function(...) -> [return values]
-    # Each entry is pa.S[idx] or pa.U[idx] depending on kind.
+    K, F = rewrite(K, F, for_micro=args.for_micro)
+    # Encode each function record as a JSON-friendly object {np, va, L, b}.
+    # When predecoding for the micro-VM, the L entries use string storage
+    # markers ("S"/"U"); when predecoding for the macro-VM (raw user code),
+    # they use the raw int kind that the macro-VM's source expects.
     new_F = []
     for tr in F:
-        L = tr['L']
-        np = tr['np']
-        va = tr['va']
-        body = tr['b']
-        parts = []
-        for kind, idx in L:
-            src = 'pa.S' if kind == 0 else 'pa.U'
-            parts.append(f"{src}[{idx}]")
-        lr_expr = "{" + ",".join(parts) + "}"
-        # Serialize the body atom
-        body_parts = []
-        emit(body, body_parts)
-        body_src = "".join(body_parts)
-        # Build closure source. tp, tu are captured from outer scope (bundle).
-        src = (
-            f"function(pa,J) "
-            f"local lr={lr_expr} "
-            f"return function(...) "
-            f"local fr={{S={{}},U=lr,V=tp(select({np+1},...))}} "
-        )
-        if np > 0:
-            src += f"for i=1,{np} do fr.S[i]={{(select(i,...))}} end "
-        src += (
-            f"local r=J({body_src},fr) "
-            f"if r then return tu(r,1,r.n) end "
-            f"end end"
-        )
-        new_F.append(Raw(src))
+        if args.for_micro:
+            L = [[("S" if kind == 0 else "U"), idx] for kind, idx in tr['L']]
+        else:
+            L = [[kind, idx] for kind, idx in tr['L']]
+        new_F.append({"np": tr['np'], "va": tr['va'], "L": L, "b": tr['b']})
     F[:] = new_F
-    # Emit as a single-value return so `require("./macrovm-ast")` works.
-    # Consumers (including build.py's bundler) unpack: `local K, F = ast[1], ast[2]`.
-    # The `tp` / `tu` locals make the baked F closures self-contained (they're
-    # upvalues captured at module-load time, not the caller's scope).
-    parts = [
-        "--!nocheck\n",
-        "local tp,tu=table.pack,table.unpack\n",
-        "return {",
-    ]
+
+    out_path = pathlib.Path(args.output)
+    if args.json:
+        # Pure JSON output. Maps Lua nil -> JSON null. Consumers must JSON.decode
+        # then pass `ast[1]` and `ast[2]` as K and F to the micro-VM.
+        import json
+        # Replace `Raw('"S"')` markers with the bare string "S" (we used Raw to
+        # force them to be emitted as quoted Lua strings; in JSON they're just
+        # strings).
+        def to_json_safe(v):
+            if isinstance(v, Raw):
+                # Raw markers we emitted are always quoted Lua string literals.
+                s = v.s
+                if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+                    return s[1:-1]
+                raise Exception(f"unhandled Raw: {s!r}")
+            if isinstance(v, list):
+                return [to_json_safe(x) for x in v]
+            if isinstance(v, dict):
+                return {k: to_json_safe(x) for k, x in v.items()}
+            return v
+        payload = [to_json_safe(K), to_json_safe(F)]
+        out_path.write_text(json.dumps(payload, separators=(",", ":")),
+                            encoding="utf-8", newline="")
+        print(f"wrote {out_path.stat().st_size} bytes (JSON)")
+        return
+
+    # Default Luau-module output: a self-contained file returning {K, F}.
+    parts = ["--!nocheck\nreturn {"]
     emit(K, parts); parts.append(",")
     emit(F, parts); parts.append("}\n")
-    pathlib.Path(args.output).write_text("".join(parts), encoding="latin-1", newline="")
-    print(f"wrote {pathlib.Path(args.output).stat().st_size} bytes")
+    out_path.write_text("".join(parts), encoding="latin-1", newline="")
+    print(f"wrote {out_path.stat().st_size} bytes")
 
 if __name__ == "__main__":
     main()

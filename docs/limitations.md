@@ -37,13 +37,19 @@ level because the macro-VM bridges it.
 
 `src/tinyvm.luau` requires:
 
-* `K` — the constant pool from the predecoded macro-VM AST.
-* `F` — the function-builder array, also from the predecoded AST.
+* `K` — the constant pool from the predecoded macro-VM AST (an array
+  of numbers, strings, booleans, and `nil` values).
+* `F` — the function records array from the predecoded AST. Each
+  record is a table `{np, va, L, b}` (number of params, vararg flag,
+  upvalue source list, body atom).
 * `E` — an env that exposes the macro-VM's globals (`string`, `table`,
   `error`, `setmetatable`, ...) **plus** the op helpers `B1`..`B14`
   and `U1`..`U3`.
 * `tp`, `tu` — `table.pack` and `table.unpack`.
-* Trailing `...` — forwarded to the macro-VM's main closure.
+* Trailing `...` — forwarded to the macro-VM's main closure. The
+  first vararg is the user code (either a bytecode string or a
+  predecoded `{K, F}` table); the second is the user env; the third
+  is the chunk label.
 
 If you just `require("./tinyvm")` and call it with raw user bytecode,
 nothing happens; the call site has to be wired up to the predecoded

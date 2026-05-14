@@ -1,7 +1,7 @@
 # `split-deploy` example
 
 A complete, runnable example of the **Option 2 (Split deploy)** recipe
-from the project README: ship `src/tinyvm.luau` (the 1.7 KB micro-VM)
+from the project README: ship `src/tinyvm.luau` (the 1.9 KB micro-VM)
 side-by-side with the predecoded macro-VM AST, instead of using the
 all-in-one `tinyvm-bundled.luau` bundle.
 
@@ -50,8 +50,8 @@ the driver builds it for you on the first run. Subsequent runs reuse it.
 Expected output:
 
 ```
-[split-deploy] staged tinyvm.luau (1713 bytes)
-[split-deploy] staged macrovm-ast.luau (25638 bytes)
+[split-deploy] staged tinyvm.luau (1955 bytes)
+[split-deploy] staged macrovm-ast.luau (22940 bytes)
 [split-deploy] compiled user.luau (1489 bytes of bytecode)
 [split-deploy] staged user_bytecode.luau (3502 bytes)
 [split-deploy] staged launcher.luau
@@ -82,7 +82,7 @@ user.luau done
 This is what you'd actually write in a real project. It:
 
 1. `require()`s the three Luau modules:
-   * `./tinyvm`        — the 1713-byte micro-VM, a function value.
+   * `./tinyvm`        — the 1955-byte micro-VM, a function value.
    * `./macrovm-ast`   — a table `{K, F}` returned by the predecoder.
    * `./user_bytecode` — a table `{hex}` containing the offline-compiled
                          user bytecode as a hex string.
@@ -135,8 +135,8 @@ the four files as a separate `ModuleScript`.
 
 |                                   | bundle (Option 1)            | split deploy (Option 2)                |
 |-----------------------------------|------------------------------|----------------------------------------|
-| Lua source you ship to users      | one file (~28 KB)            | one file (`tinyvm.luau`, 1.7 KB)       |
-| Extra "data" modules you ship     | none                         | `macrovm-ast.luau` (~26 KB)            |
+| Lua source you ship to users      | one file (~25 KB)            | one file (`tinyvm.luau`, 1.9 KB)       |
+| Extra "data" modules you ship     | none                         | `macrovm-ast.luau` (~23 KB)            |
 | Op-helper env wiring              | done for you (`_E(u)` helper)| your launcher provides it              |
 | `tp` / `tu` setup                 | done for you                 | your launcher provides it              |
 | Best when                         | shipping a single file is OK | source size matters; data is cheap     |
@@ -144,6 +144,9 @@ the four files as a separate `ModuleScript`.
 If you don't have a strong reason to split, use the bundle. The
 launcher in this example is straightforward, but it's still ~75
 lines of boilerplate that the bundle saves you from writing.
+
+See the sibling [`json-deploy/`](../json-deploy/) for the same idea
+but with JSON as the wire format.
 
 
 ## Customizing

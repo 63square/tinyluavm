@@ -43,27 +43,29 @@ The third argument (`"myscript.luau"`) is the chunk label shown in
 ## 3. Split deploy (smallest user-facing source)
 
 If the size of the Luau source you ship matters more than the size of
-the macro-VM data, ship just `src/tinyvm.luau` (1.7 KB) and load the
+the macro-VM data, ship just `src/tinyvm.luau` (1.9 KB) and load the
 predecoded macro-VM AST through a separate channel. The micro-VM
 signature is:
 
 ```lua
-micro(K, F, E, tp, tu, userBytecode, userEnv, label, ...)
+micro(K, F, E, tp, tu, userCode, userEnv, label, ...)
 ```
 
-* `K, F` — the constant pool and function-builder array from
+* `K, F` — the constant pool and function records array from
   `build/macrovm-ast.luau` (a Lua expression, not bytes).
 * `E` — env table the macro-VM uses for its own globals (must include
   the op helpers `B1`..`B14` and `U1`..`U3`).
 * `tp, tu` — `table.pack` and `table.unpack`.
-* `userBytecode, userEnv, label, ...` — passed through to the macro-VM
-  main closure.
+* `userCode` — either a byte string (the macro-VM reads it) or a
+  pre-decoded `{K, F}` table (the macro-VM uses it directly).
+* `userEnv, label, ...` — passed through to the macro-VM main closure.
 
 Concrete example wiring it up yourself:
 
 ```lua
-local micro       = require("./tinyvm")              -- the 1713-byte module
-local K, F        = require("./macrovm-ast")         -- the pre-decoded AST
+local micro       = require("./tinyvm")              -- the 1955-byte module
+local ast         = require("./macrovm-ast")         -- returns {K, F}
+local K, F        = ast[1], ast[2]
 local tp, tu      = table.pack, table.unpack
 
 local userEnv     = setmetatable({}, {__index = _G})
@@ -95,20 +97,53 @@ local userBytecode = "..."  -- bytes from tools/compiler.py
 micro(K, F, shadowEnv, tp, tu, userBytecode, userEnv, "myscript.luau")
 ```
 
-The macro-VM AST is a plain Lua module. Where it lives is up to you:
+See [`split-deploy/`](split-deploy/) for a complete runnable example.
 
-* As `macrovm-ast.luau` next to your shipped script: `require` it.
-* As a `ModuleScript` in Roblox: `require(script.MacroVMAst)`.
+
+## 4. All-JSON deploy
+
+If you want every input tinyvm consumes to be JSON-encodable (no
+binary bytecode, no Lua-syntax-only modules), use the predecoder's
+`--json` flag for both the macro-VM and your user program:
+
+```bash
+# Macro-VM: needs --for-micro because the micro-VM consumes it.
+python tools/predecode.py build/macrovm.bin macrovm-ast.json \
+    --for-micro --json
+
+# User program: no --for-micro because the macro-VM consumes it.
+python tools/compiler.py myscript.luau myscript.bin
+python tools/predecode.py myscript.bin myscript-ast.json --json
+```
+
+Both files have shape `[K, F]` and are pure data — numbers, strings,
+booleans, nulls, arrays, objects. At runtime your launcher decodes
+each with any JSON parser and passes the resulting tables to the
+micro-VM. The macro-VM detects `type(b) == "table"` and skips its
+bytecode reader.
+
+```lua
+local userAst = jsondec(loadUserJsonSomehow())  -- {K, F}
+micro(macroK, macroF, shadowEnv, tp, tu, userAst, userEnv, "myscript.luau")
+```
+
+See [`json-deploy/`](json-deploy/) for a complete runnable example
+including a tiny JSON parser.
+
+The macro-VM AST is just data. Where it lives is up to you:
+
+* As a Luau `ModuleScript` returning `{K, F}` — `require()` it.
+* As a JSON string from a `HttpService:GetAsync` response, then
+  parsed with any JSON library.
 * As a generated string literal embedded in your code at build time.
-* As a `HttpService:GetAsync` response, an asset, etc.
+* As an asset blob, MessagePack frame, etc.
 
-Note that `macrovm-ast.luau` is ~25 KB of Lua source — larger than
-the bytecode it was decoded from. The trade is: the micro-VM no
-longer needs a runtime bytecode reader (saving ~1.5 KB of micro-VM
-source), and per-function closure setup is baked into the AST itself
-(saving another ~200 bytes). If you'd rather ship the smaller raw
-bytecode and run a reader at load time, see the git history before
-the `experimental-sub2k` branch.
+Note that `macrovm-ast.luau` is ~22 KB of Lua source — larger than
+the bytecode it was decoded from (~5.8 KB). The trade is: the
+micro-VM no longer needs a runtime bytecode reader (saving ~1.5 KB
+of micro-VM source). If you'd rather ship the smaller raw bytecode
+and run a reader at load time, see the git history before the
+`experimental-sub2k` branch.
 
 ## Compiling user programs
 
