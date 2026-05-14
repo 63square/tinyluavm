@@ -1,0 +1,16 @@
+# Build outputs (regenerable via `python tools/build.py`)
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Compiled user bytecode
+*.bin
+
+# Editor scratch
+*.swp
+*~
+.vscode/
+.idea/
