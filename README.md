@@ -115,8 +115,9 @@ macro-VM data through another channel:
 
 ```lua
 local micro    = require("./tinyvm")             -- 1713-byte module
-local K, F     = loadMacroVMAst()                -- your loader; returns K, F
-local env      = ... -- shadow env with B1..B14, U1..U3 + user globals
+local ast      = require("./macrovm-ast")        -- returns {K, F}
+local K, F     = ast[1], ast[2]
+local env      = ...   -- shadow env with B1..B14, U1..U3 + user globals
 local tp, tu   = table.pack, table.unpack
 
 -- micro(K, F, env, tp, tu, userBytecode, userEnv, label, ...)
@@ -124,10 +125,10 @@ micro(K, F, env, tp, tu, userBytecode, userEnv, label)
 ```
 
 `build/macrovm-ast.luau` is a ready-to-use ModuleScript-style file that
-returns `K, F` — it's a Lua expression, not raw bytes. The build pipeline
-produces it from `src/macrovm.luau` via `tools/predecode.py`. Wire it up
-in your own way (an asset, a `ModuleScript`, a generated string literal,
-etc.).
+returns `{K, F}` — it's a Lua expression, not raw bytes. The build
+pipeline produces it from `src/macrovm.luau` via `tools/predecode.py`.
+Wire it up in your own way (an asset, a `ModuleScript`, a generated
+string literal, etc.).
 
 Notes:
 
@@ -139,7 +140,10 @@ Notes:
   It's just a normal table.
 
 The bundle (Option 1) is the recommended path unless source size is
-critical.
+critical. See [`examples/split-deploy/`](examples/split-deploy/) for a
+complete, runnable example of this recipe — including the launcher
+script you'd write, a sample user program, and a driver that assembles
+the staged module tree.
 
 
 ## How small is it really?
