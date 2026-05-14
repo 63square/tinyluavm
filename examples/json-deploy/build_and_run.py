@@ -2,21 +2,23 @@
 """End-to-end driver for the json-deploy example.
 
 This example demonstrates a fully JSON-encodable input plane to tinyvm:
-both the macro-VM AST and the user program are pre-decoded to JSON before
-launch. The launcher decodes them with a tiny Lua JSON parser and hands
-the resulting tables to the micro-VM.
+the macro-VM AST and the user program are pre-decoded into a single
+combined JSON document. The launcher decodes that one document with a
+tiny Lua JSON parser and hands the resulting table to the micro-VM as
+its `inputData` argument.
 
 Steps:
   1. Make sure build/macrovm.bin exists (build it if not).
-  2. Predecode build/macrovm.bin -> staged/macrovm-ast.json (--for-micro).
-  3. Compile user.luau               -> user.bin
-  4. Predecode user.bin              -> staged/user-ast.json (no --for-micro)
-  5. Wrap each JSON file in a Luau module returning it as a string.
-  6. Copy src/tinyvm.luau, jsondec.luau, launcher.luau to staged/.
-  7. Run `luau staged/launcher.luau`.
+  2. Compile user.luau          -> user.bin
+  3. Predecode them together    -> staged/payload.json
+                                   shape: {"m":[K,F], "u":[K,F]}
+  4. Wrap the JSON payload in a Luau module returning it as a string
+                                -> staged/payload-json.luau
+  5. Copy src/tinyvm.luau, jsondec.luau, launcher.luau to staged/.
+  6. Run `luau staged/launcher.luau`.
 """
 from __future__ import annotations
-import sys, pathlib, subprocess, shutil
+import sys, pathlib, subprocess, shutil, tempfile
 
 HERE   = pathlib.Path(__file__).resolve().parent
 ROOT   = HERE.parents[1]
@@ -41,13 +43,15 @@ def ensure_macro_bin() -> pathlib.Path:
     return bin_path
 
 
-def predecode_to_json(in_bin: pathlib.Path, out_json: pathlib.Path,
-                       for_micro: bool) -> None:
-    args = [sys.executable, str(TOOLS / "predecode.py"),
-            str(in_bin), str(out_json), "--json"]
-    if for_micro:
-        args.append("--for-micro")
-    subprocess.check_call(args, stdout=subprocess.DEVNULL)
+def predecode_combined(macro_bin: pathlib.Path, user_bin: pathlib.Path,
+                        out_json: pathlib.Path) -> None:
+    """Predecode macro-VM + user code into a single combined JSON payload."""
+    subprocess.check_call(
+        [sys.executable, str(TOOLS / "predecode.py"),
+         str(macro_bin), str(out_json),
+         "--for-micro", "--json", "--user", str(user_bin)],
+        stdout=subprocess.DEVNULL,
+    )
 
 
 def compile_user(src: pathlib.Path, out: pathlib.Path) -> None:
@@ -87,36 +91,31 @@ def stage():
         shutil.rmtree(STAGED)
     STAGED.mkdir()
 
-    # 1. Compile + predecode the macro-VM (uses --for-micro: the micro-VM-
-    #    specific atom rewrites apply because the *micro-VM* will consume it).
+    # 1. Make sure the compiled macro-VM bytecode exists.
     macro_bin = ensure_macro_bin()
-    macro_json = STAGED / "macrovm-ast.json"
-    predecode_to_json(macro_bin, macro_json, for_micro=True)
-    info(f"predecoded macro-VM -> {macro_json.name} "
-         f"({macro_json.stat().st_size} bytes)")
 
-    # 2. Compile + predecode the user program (no --for-micro: the *macro-VM*
-    #    consumes it at runtime, so we only apply rewrites the macro-VM
-    #    supports).
-    user_bin = STAGED / "user.bin"
-    compile_user(HERE / "user.luau", user_bin)
-    user_json = STAGED / "user-ast.json"
-    predecode_to_json(user_bin, user_json, for_micro=False)
-    info(f"predecoded user.luau -> {user_json.name} "
-         f"({user_json.stat().st_size} bytes)")
-    user_bin.unlink()
+    # 2. Compile the user program; immediately predecode with the macro-VM
+    #    into a single combined payload.
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td)
+        user_bin = td / "user.bin"
+        compile_user(HERE / "user.luau", user_bin)
+        payload_json = STAGED / "payload.json"
+        predecode_combined(macro_bin, user_bin, payload_json)
+        info(f"predecoded macro-VM + user.luau -> payload.json "
+             f"({payload_json.stat().st_size} bytes)")
 
-    # 3. Wrap each JSON file in a Luau module the launcher can require().
-    wrap_json_as_module(macro_json, STAGED / "macrovm-ast-json.luau")
-    wrap_json_as_module(user_json,  STAGED / "user-ast-json.luau")
-    macro_json.unlink()
-    user_json.unlink()
-    info("wrapped JSON payloads as Luau modules")
+    # 3. Wrap the JSON document in a Luau module so the launcher can
+    #    `require()` it. Replace this in a real deployment with whatever
+    #    channel makes sense (HttpService:GetAsync, an asset, etc.).
+    wrap_json_as_module(payload_json, STAGED / "payload-json.luau")
+    payload_json.unlink()
+    info("wrapped JSON payload as a Luau module")
 
     # 4. Stage the micro-VM source, the JSON decoder, and the launcher.
-    shutil.copy(SRC / "tinyvm.luau",        STAGED / "tinyvm.luau")
-    shutil.copy(HERE / "jsondec.luau",      STAGED / "jsondec.luau")
-    shutil.copy(HERE / "launcher.luau",     STAGED / "launcher.luau")
+    shutil.copy(SRC / "tinyvm.luau",    STAGED / "tinyvm.luau")
+    shutil.copy(HERE / "jsondec.luau",  STAGED / "jsondec.luau")
+    shutil.copy(HERE / "launcher.luau", STAGED / "launcher.luau")
     info(f"staged tinyvm.luau ({(SRC/'tinyvm.luau').stat().st_size} bytes), "
          f"jsondec.luau, launcher.luau")
 

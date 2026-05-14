@@ -35,26 +35,24 @@ level because the macro-VM bridges it.
 
 ### The micro-VM cannot run standalone
 
-`src/tinyvm.luau` requires:
+`src/tinyvm.luau` is `function(env, inputData, userEnv, label)` and
+requires:
 
-* `K` — the constant pool from the predecoded macro-VM AST (an array
-  of numbers, strings, booleans, and `nil` values).
-* `F` — the function records array from the predecoded AST. Each
-  record is a table `{np, va, L, b}` (number of params, vararg flag,
-  upvalue source list, body atom).
-* `E` — an env that exposes the macro-VM's globals (`string`, `table`,
-  `error`, `setmetatable`, ...) **plus** the op helpers `B1`..`B14`
-  and `U1`..`U3`.
-* `tp`, `tu` — `table.pack` and `table.unpack`.
-* Trailing `...` — forwarded to the macro-VM's main closure. The
-  first vararg is the user code (either a bytecode string or a
-  predecoded `{K, F}` table); the second is the user env; the third
-  is the chunk label.
+* `env` — an env that exposes the macro-VM's globals (`string`,
+  `table`, `error`, `setmetatable`, ...) **plus** the op helpers
+  `B1`..`B14` and `U1`..`U3` (functions implementing the binary and
+  unary operators the predecoder rewrote BinOp/UnOp atoms into).
+* `inputData` — `{m = macroAst, u = userAst}` where each value is a
+  pre-decoded `{K, F}` produced by `tools/predecode.py`. The
+  micro-VM has no bytecode reader; raw `.bin` strings are not
+  accepted.
+* `userEnv` — the table the user program sees as its `_G`.
+* `label` — the chunk name shown in diagnostic messages.
 
-If you just `require("./tinyvm")` and call it with raw user bytecode,
-nothing happens; the call site has to be wired up to the predecoded
-artifacts. Use `build/tinyvm-bundled.luau` unless you're doing a
-custom integration. See `examples/USAGE.md`.
+If you just `require("./tinyvm")` and call it without first
+predecoding the macro-VM, nothing happens; the call site has to be
+wired up to the predecoded artifacts. See `examples/split-deploy/`
+and `examples/json-deploy/` for complete recipes.
 
 ### The op-helper env
 
@@ -62,13 +60,10 @@ The predecoder rewrites every BinOp/UnOp atom in the macro-VM into a
 Call atom that looks up `B1`..`B14` / `U1`..`U3` in the env. If your
 env doesn't expose them, the macro-VM will fail to run (you'll see
 errors like `attempt to call a nil value` while it's setting up
-constants). The bundle's `_E(u)` helper builds a shadow env exposing
-them on top of your user env.
-
-If you supply your own env wrapping, replicate this:
+constants). Build a shadow env on top of your user env:
 
 ```lua
-local _E = setmetatable({
+local shadowEnv = setmetatable({
   B1 = function(a, b) return a + b end,
   B2 = function(a, b) return a - b end,
   -- ...
@@ -156,8 +151,8 @@ to remove the BinOp/UnOp handlers from the micro-VM source.
 
 The micro-VM's outermost invocation does **not** return the user
 program's return values. That is, if your user program ends with
-`return 42`, the bundle's `play(...)` call returns nothing
-(implicit `nil`). This is a deliberate byte-saving choice in the
-current build. Inner function returns still work normally — closures
-in user code see each other's return values, `pcall` sees errors and
-returns, etc. Only the outermost-of-outermost return is dropped.
+`return 42`, the `micro(...)` call returns nothing (implicit `nil`).
+This is a deliberate byte-saving choice in the current build. Inner
+function returns still work normally — closures in user code see each
+other's return values, `pcall` sees errors and returns, etc. Only the
+outermost-of-outermost return is dropped.

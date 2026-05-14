@@ -318,50 +318,62 @@ def lua_str(s: str) -> str:
     out.append('"')
     return "".join(out)
 
+def _predecode_one(bin_path: pathlib.Path, for_micro: bool):
+    """Read a .bin file and return (K, F) in the JSON-friendly shape.
+
+    Returns the K list and a list of {np, va, L, b} dicts. When for_micro
+    is set, applies the micro-VM-specific atom rewrites and uses string
+    storage markers in L; otherwise uses raw int kinds the macro-VM
+    consumes natively.
+    """
+    K, F = read_bin(bin_path.read_bytes())
+    K, F = rewrite(K, F, for_micro=for_micro)
+    new_F = []
+    for tr in F:
+        if for_micro:
+            L = [[("S" if kind == 0 else "U"), idx] for kind, idx in tr['L']]
+        else:
+            L = [[kind, idx] for kind, idx in tr['L']]
+        new_F.append({"np": tr['np'], "va": tr['va'], "L": L, "b": tr['b']})
+    return K, new_F
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("input")
-    ap.add_argument("output")
+    ap.add_argument("input", help="macro-VM bytecode (.bin)")
+    ap.add_argument("output", help="output file path")
     ap.add_argument("--for-micro", action="store_true",
                     help="apply the micro-VM-specific atom rewrites "
-                         "(use when predecoding the macro-VM itself, not "
-                         "user programs)")
+                         "(use when predecoding the macro-VM itself)")
+    ap.add_argument("--user", metavar="PATH",
+                    help="also predecode this user-program bytecode and "
+                         "emit a combined `inputData` payload "
+                         "`{macro=[K,F], user=[K,F]}`")
     ap.add_argument("--census", action="store_true")
     ap.add_argument("--json", action="store_true",
                     help="emit pure JSON instead of a Luau module")
     args = ap.parse_args()
 
-    data = pathlib.Path(args.input).read_bytes()
-    K, F = read_bin(data)
+    in_path = pathlib.Path(args.input)
+    out_path = pathlib.Path(args.output)
+
     if args.census:
+        K, F = read_bin(in_path.read_bytes())
         cnt = count_tags(F)
         for tag, n in sorted(cnt.items()): print(f"  tag {tag}: {n}")
         return
-    K, F = rewrite(K, F, for_micro=args.for_micro)
-    # Encode each function record as a JSON-friendly object {np, va, L, b}.
-    # When predecoding for the micro-VM, the L entries use string storage
-    # markers ("S"/"U"); when predecoding for the macro-VM (raw user code),
-    # they use the raw int kind that the macro-VM's source expects.
-    new_F = []
-    for tr in F:
-        if args.for_micro:
-            L = [[("S" if kind == 0 else "U"), idx] for kind, idx in tr['L']]
-        else:
-            L = [[kind, idx] for kind, idx in tr['L']]
-        new_F.append({"np": tr['np'], "va": tr['va'], "L": L, "b": tr['b']})
-    F[:] = new_F
 
-    out_path = pathlib.Path(args.output)
+    macro_K, macro_F = _predecode_one(in_path, for_micro=args.for_micro)
+    user_K = user_F = None
+    if args.user:
+        # User code is consumed by the macro-VM at runtime; never apply
+        # the micro-VM-specific atom rewrites.
+        user_K, user_F = _predecode_one(pathlib.Path(args.user), for_micro=False)
+
     if args.json:
-        # Pure JSON output. Maps Lua nil -> JSON null. Consumers must JSON.decode
-        # then pass `ast[1]` and `ast[2]` as K and F to the micro-VM.
         import json
-        # Replace `Raw('"S"')` markers with the bare string "S" (we used Raw to
-        # force them to be emitted as quoted Lua strings; in JSON they're just
-        # strings).
         def to_json_safe(v):
             if isinstance(v, Raw):
-                # Raw markers we emitted are always quoted Lua string literals.
                 s = v.s
                 if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
                     return s[1:-1]
@@ -371,16 +383,32 @@ def main():
             if isinstance(v, dict):
                 return {k: to_json_safe(x) for k, x in v.items()}
             return v
-        payload = [to_json_safe(K), to_json_safe(F)]
+        if args.user:
+            # Single-letter keys "m" and "u" keep the wire payload small and
+            # match the micro-VM's accesses (D.m / D.u).
+            payload = {
+                "m": [to_json_safe(macro_K), to_json_safe(macro_F)],
+                "u": [to_json_safe(user_K),  to_json_safe(user_F)],
+            }
+        else:
+            payload = [to_json_safe(macro_K), to_json_safe(macro_F)]
         out_path.write_text(json.dumps(payload, separators=(",", ":")),
                             encoding="utf-8", newline="")
         print(f"wrote {out_path.stat().st_size} bytes (JSON)")
         return
 
-    # Default Luau-module output: a self-contained file returning {K, F}.
-    parts = ["--!nocheck\nreturn {"]
-    emit(K, parts); parts.append(",")
-    emit(F, parts); parts.append("}\n")
+    # Default Luau-module output.
+    parts = ["--!nocheck\nreturn "]
+    if args.user:
+        parts.append("{m={")
+        emit(macro_K, parts); parts.append(",")
+        emit(macro_F, parts); parts.append("},u={")
+        emit(user_K, parts); parts.append(",")
+        emit(user_F, parts); parts.append("}}\n")
+    else:
+        parts.append("{")
+        emit(macro_K, parts); parts.append(",")
+        emit(macro_F, parts); parts.append("}\n")
     out_path.write_text("".join(parts), encoding="latin-1", newline="")
     print(f"wrote {out_path.stat().st_size} bytes")
 

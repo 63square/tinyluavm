@@ -1,15 +1,20 @@
 # `split-deploy` example
 
-A complete, runnable example of the **Option 2 (Split deploy)** recipe
-from the project README: ship `src/tinyvm.luau` (the 1.9 KB micro-VM)
-side-by-side with the predecoded macro-VM AST, instead of using the
-all-in-one `tinyvm-bundled.luau` bundle.
+A complete, runnable example of shipping tinyvm as three separate Luau
+modules:
+
+1. `tinyvm.luau` — the 1997-byte micro-VM.
+2. `macrovm-ast.luau` — the pre-decoded macro-VM AST (`return {K, F}`).
+3. `user-ast.luau` — the pre-decoded user program (`return {K, F}`).
+
+The launcher `require()`s all three, combines the two ASTs into the
+micro-VM's `inputData` argument, and calls `micro(...)`.
 
 This is the layout you'd use when:
 
 * the Luau source you ship matters (`src/tinyvm.luau` is the only
   Luau-source file the user sees), and
-* you can deliver the macro-VM AST through a separate channel — a
+* you can deliver the AST modules through a separate channel — a
   Roblox `ModuleScript`, a `HttpService:GetAsync` response, an asset,
   or a generated string literal pasted into your build pipeline.
 
@@ -19,13 +24,13 @@ This is the layout you'd use when:
 ```
 examples/split-deploy/
 ├── README.md              you are here
-├── build_and_run.py       driver: compile user.luau, stage files, invoke luau
+├── build_and_run.py       driver: compile + predecode + stage + invoke luau
 ├── launcher.luau          ★ the launcher: this is the file you'd write
 ├── user.luau              a sample user program
 └── staged/                ↑ assembled by build_and_run.py, gitignored
     ├── tinyvm.luau            copy of src/tinyvm.luau
     ├── macrovm-ast.luau       copy of build/macrovm-ast.luau
-    ├── user_bytecode.luau     user.luau compiled to bytecode, hex-encoded
+    ├── user-ast.luau          user.luau predecoded to {K, F}
     └── launcher.luau          copy of ../launcher.luau
 ```
 
@@ -45,15 +50,16 @@ python examples/split-deploy/build_and_run.py
 ```
 
 If you haven't built the macro-VM AST yet (`build/macrovm-ast.luau`),
-the driver builds it for you on the first run. Subsequent runs reuse it.
+the driver builds it for you on the first run. Subsequent runs reuse
+it.
 
 Expected output:
 
 ```
-[split-deploy] staged tinyvm.luau (1955 bytes)
-[split-deploy] staged macrovm-ast.luau (22940 bytes)
+[split-deploy] staged tinyvm.luau (1997 bytes)
+[split-deploy] staged macrovm-ast.luau (17065 bytes)
 [split-deploy] compiled user.luau (1489 bytes of bytecode)
-[split-deploy] staged user_bytecode.luau (3502 bytes)
+[split-deploy] predecoded user.luau -> user-ast.luau (3916 bytes)
 [split-deploy] staged launcher.luau
 [split-deploy] invoking luau on staged/launcher.luau
 ============================================================
@@ -82,11 +88,10 @@ user.luau done
 This is what you'd actually write in a real project. It:
 
 1. `require()`s the three Luau modules:
-   * `./tinyvm`        — the 1955-byte micro-VM, a function value.
-   * `./macrovm-ast`   — a table `{K, F}` returned by the predecoder.
-   * `./user_bytecode` — a table `{hex}` containing the offline-compiled
-                         user bytecode as a hex string.
-2. Hex-decodes the bytecode back into a byte string.
+   * `./tinyvm`      — the 1997-byte micro-VM, a function value.
+   * `./macrovm-ast` — a `{K, F}` table for the macro-VM.
+   * `./user-ast`    — a `{K, F}` table for the user program.
+2. Combines the two ASTs into `inputData = {m = mvmAst, u = userAst}`.
 3. Builds a **shadow env** that wraps the user env, exposing the
    `B1`..`B14` (binary op) and `U1`..`U3` (unary op) helper functions
    the predecoder rewrote BinOp/UnOp atoms into. `__index` falls
@@ -94,8 +99,7 @@ This is what you'd actually write in a real project. It:
 4. Calls the micro-VM:
 
    ```lua
-   micro(K, F, shadowEnv, table.pack, table.unpack,
-         userBytecode, userEnv, "user.luau")
+   micro(shadowEnv, inputData, userEnv, "user.luau")
    ```
 
 The call is wrapped in `pcall` so an uncaught user error prints
@@ -114,39 +118,23 @@ If you can break any of this, please [open an issue](../../../../issues).
 
 ### `build_and_run.py` (the driver)
 
-A ~110-line Python script that mimics what your real build pipeline
+A ~100-line Python script that mimics what your real build pipeline
 would do:
 
 * Make sure `build/macrovm-ast.luau` exists, running `tools/build.py`
   if not.
 * Compile `user.luau` to a `.bin` via `tools/compiler.py`.
-* Wrap the compiled bytecode as a hex-encoded string in a tiny Luau
-  module `user_bytecode.luau`.
-* Copy `src/tinyvm.luau`, `build/macrovm-ast.luau`, and the launcher
-  into `staged/`.
+* Predecode the `.bin` into a Luau module `user-ast.luau` returning
+  `{K, F}` via `tools/predecode.py` (without `--for-micro` — the
+  macro-VM consumes the user AST at runtime, so we keep the
+  macro-VM-friendly atom set).
+* Copy `src/tinyvm.luau`, `build/macrovm-ast.luau`, the
+  predecoded `user-ast.luau`, and the launcher into `staged/`.
 * Invoke `luau staged/launcher.luau`.
 
 Nothing about this is specific to the example — you'd do roughly the
 same shape of work in a Roblox build pipeline that uploads each of
 the four files as a separate `ModuleScript`.
-
-
-## How it compares to the bundle
-
-|                                   | bundle (Option 1)            | split deploy (Option 2)                |
-|-----------------------------------|------------------------------|----------------------------------------|
-| Lua source you ship to users      | one file (~25 KB)            | one file (`tinyvm.luau`, 1.9 KB)       |
-| Extra "data" modules you ship     | none                         | `macrovm-ast.luau` (~23 KB)            |
-| Op-helper env wiring              | done for you (`_E(u)` helper)| your launcher provides it              |
-| `tp` / `tu` setup                 | done for you                 | your launcher provides it              |
-| Best when                         | shipping a single file is OK | source size matters; data is cheap     |
-
-If you don't have a strong reason to split, use the bundle. The
-launcher in this example is straightforward, but it's still ~75
-lines of boilerplate that the bundle saves you from writing.
-
-See the sibling [`json-deploy/`](../json-deploy/) for the same idea
-but with JSON as the wire format.
 
 
 ## Customizing
@@ -155,9 +143,12 @@ but with JSON as the wire format.
   `__index` to `_G`. Replace it with a curated table to sandbox.
 * **Injecting host APIs.** Add fields to `userEnv` before calling
   the micro-VM — they show up as globals in user code.
-* **Different bytecode delivery.** `user_bytecode.luau` is just a
-  Luau module returning a hex string in a table. In a real project,
-  swap it for whatever module returns whatever shape of bytes you
-  prefer; just decode in the launcher before calling the micro-VM.
+* **Different transport for the ASTs.** The launcher uses `require()`,
+  but the modules can come from anywhere: a Roblox `ModuleScript`,
+  generated string literals, etc. Replace `require("./macrovm-ast")`
+  with whatever loader returns the `{K, F}` table.
 * **More user programs.** Drop another `.luau` file in this folder
-  and tweak `build_and_run.py` to compile and run that one too.
+  and tweak `build_and_run.py` to compile and predecode that one too.
+
+See the sibling [`json-deploy/`](../json-deploy/) for the same idea
+but with a single combined JSON document as the wire format.

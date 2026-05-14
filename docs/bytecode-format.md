@@ -208,7 +208,10 @@ a Call atom whose function is the global `B<opCode>` (one of
 
 The predecoder appends 17 string constants to K: `"B1"`..`"B14"`,
 `"U1"`..`"U3"`. The caller-provided env must expose those names as
-functions; the bundle's `_E(u)` helper does this automatically.
+functions; both example launchers
+([split-deploy](../examples/split-deploy/launcher.luau) and
+[json-deploy](../examples/json-deploy/launcher.luau)) build a shadow
+env that does this and falls through to the user env via `__index`.
 
 #### Local/Upval unify
 
@@ -287,6 +290,49 @@ Multi-target Assign (only used in 1 place in the macro-VM, and only
 with all-local targets) becomes `[30, [slot1, slot2, ...], values]`
 — the targets list is flattened from atoms to slot ints.
 
+
+## Combined input payload (`--user`)
+
+`tools/predecode.py` can predecode both the macro-VM and a user
+program in a single invocation and emit them as one payload. This is
+the shape the micro-VM consumes via its `inputData` parameter.
+
+```bash
+python tools/predecode.py build/macrovm.bin payload.luau --for-micro \
+    --user myscript.bin
+```
+
+Output (Luau form):
+
+```lua
+--!nocheck
+return {m = {<macroK>, <macroF>}, u = {<userK>, <userF>}}
+```
+
+Output (JSON form, with additional `--json`):
+
+```json
+{
+  "m": [<macroK>, <macroF>],
+  "u": [<userK>, <userF>]
+}
+```
+
+The single-letter keys `m` (macro) and `u` (user) match the micro-VM's
+accesses (`D.m` and `D.u`).
+
+The macro-VM half always carries the micro-VM-specific rewrites
+(implied by `--for-micro` applying to the first input). The user half
+never carries them — the macro-VM consumes it at runtime, so its atoms
+stay in the form the macro-VM source recognizes (raw int upvalue
+kinds, unflattened If/NumericFor/GenericFor, native BinOp/UnOp atoms).
+
+When `--user` is omitted, output is just the macro-VM's `[K, F]` (or
+`{K, F}` in Luau form). When `--for-micro` is omitted entirely (with
+no `--user`), the predecoder emits a user-program-shaped AST for direct
+macro-VM consumption.
+
+
 ## Atoms the micro-VM handles
 
 After all rewrites, the micro-VM dispatches on this reduced atom set:
@@ -357,13 +403,25 @@ implements them when interpreting user bytecode.
 ## JSON form
 
 `tools/predecode.py --json` emits a pure JSON document instead of a
-Luau module. The top-level shape is:
+Luau module. The top-level shape depends on whether `--user` is given:
+
+Without `--user` (just the macro-VM, or just a user program):
 
 ```json
 [
   [<K entries>],
   [<F entries>]
 ]
+```
+
+With `--user` (the combined payload the micro-VM consumes as
+`inputData`):
+
+```json
+{
+  "m": [<macroK>, <macroF>],
+  "u": [<userK>,  <userF>]
+}
 ```
 
 Mappings:

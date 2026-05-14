@@ -4,30 +4,32 @@
 plus a **build-time atom-rewriting predecoder** that does heavy lifting
 the micro-VM would otherwise have to do at runtime.
 
-1. The **micro-VM** (`src/tinyvm.luau`, 1955 bytes) is a stripped tree-
+1. The **micro-VM** (`src/tinyvm.luau`, 1997 bytes) is a stripped tree-
    walker that interprets a pre-decoded atom tree.
-2. The **macro-VM** (`src/macrovm.luau`, 6.9 KB) is a full-featured
+2. The **macro-VM** (`src/macrovm.luau`, 5.2 KB) is a full-featured
    Luau interpreter — compiled offline and pre-decoded — that the
    micro-VM *executes*.
 3. The **predecoder** (`tools/predecode.py`) rewrites the macro-VM's
    atom tree at build time: folding constants, replacing arithmetic
    opcodes with calls to env-supplied helpers, unifying opcodes, and
-   converting function records to a JSON-friendly shape. This is what
-   lets the micro-VM be so small while keeping every input to it pure
-   data.
+   converting function records to a JSON-friendly shape. The same tool
+   also predecodes user programs into the same data shape.
 
 A user program goes through this pipeline at run time:
 
 ```
                   ┌──────────────────────────────────────────────────┐
                   │ user.luau                                        │
-                  │   compiled offline → user.bin (or user-ast.json) │
+                  │   compiled offline   → user.bin                  │
+                  │   predecoded offline → user AST                  │
                   │                                                  │
-                  │   bundle.play(user, env, label, ...) →           │
+                  │   inputData = {m = macroAst, u = userAst}        │
                   │                                                  │
-   src/tinyvm.luau (the micro-VM, 1.9 KB) ── interprets ── macro-VM AST
+                  │   micro(env, inputData, userEnv, label)          │
                   │                                                  │
-                  │   macro-VM ── interprets ── user code            │
+   src/tinyvm.luau (the micro-VM, 2 KB) ── interprets ── macroAst
+                  │                                                  │
+                  │   macro-VM ── interprets ── userAst              │
                   │                                                  │
                   │   user program executes                          │
                   └──────────────────────────────────────────────────┘
@@ -35,11 +37,9 @@ A user program goes through this pipeline at run time:
 
 The macro-VM AST is **not bytecode** at micro-VM run time; it's already
 a tree of Lua tables produced at build time. The micro-VM never decodes
-varints or reads byte streams. It just walks atoms.
-
-Likewise, the macro-VM can be fed either bytecode bytes **or** a
-pre-decoded user AST as a table — `type(b)=="table"` skips the macro-VM's
-own bytecode reader and treats `b[1]`, `b[2]` as `K`, `F` directly.
+varints or reads byte streams. It just walks atoms. The macro-VM at
+runtime likewise consumes a pre-decoded user AST, not bytes — it no
+longer has its own bytecode reader.
 
 
 ## Why three pieces?
@@ -63,29 +63,27 @@ into a smaller equivalent set before the micro-VM ever sees them.
 The micro-VM's signature is:
 
 ```lua
-function(K, F, E, tp, tu, ...)
+function(env, inputData, userEnv, label)
 ```
 
-where:
+| param       | what it is                                                     |
+|-------------|----------------------------------------------------------------|
+| `env`       | env table the macro-VM uses for its own globals (must include  |
+|             | the op helpers `B1`..`B14` / `U1`..`U3`)                       |
+| `inputData` | `{m = macroAst, u = userAst}` where each is `{K, F}`           |
+| `userEnv`   | what user code sees as its `_G` (a normal table)               |
+| `label`     | chunk name shown in `error()` diagnostics                      |
 
-| param | what it is                                                   |
-|-------|--------------------------------------------------------------|
-| `K`   | array of constants (numbers, strings, booleans, nil)         |
-| `F`   | array of function records `{np, va, L, b}`                   |
-| `E`   | env table (caller-provided; macro-VM globals look here)      |
-| `tp`  | `table.pack`                                                 |
-| `tu`  | `table.unpack`                                               |
-| `...` | passed through to the macro-VM main closure                  |
-
-`K` and `F` are pure data — no function literals, no userdata. Every
+`inputData` is pure data — no function literals, no userdata. Every
 nested value is a number, string, boolean, nil, or table. This means
-the entire `[K, F]` payload is JSON-encodable: pre-decode the
-macro-VM with `tools/predecode.py --json` and load the JSON at
-runtime with any JSON parser.
+the whole payload is JSON-encodable; pre-decode both the macro-VM and
+your user code with `tools/predecode.py --for-micro --json --user
+<user.bin>` and load the JSON at runtime with any JSON parser.
 
-The `E`, `tp`, `tu` parameters are host-side wiring (the env exposes
-op-helper functions `B1`..`B14` / `U1`..`U3`; `tp`/`tu` are stdlib
-pack/unpack), not part of any serialized payload.
+`env` and `userEnv` are runtime wiring (the env exposes op-helper
+functions; the user env is the user-code globals namespace), not part
+of any serialized payload. `table.pack` and `table.unpack` are looked
+up internally inside the micro-VM.
 
 
 ## Where the byte savings come from
@@ -98,22 +96,26 @@ pack/unpack), not part of any serialized payload.
 | Vararg expression atom (tag 5) in `z`                | macro-VM only uses Vararg in tail-call position; `P` handles it                                                                    |   ~28  |
 | Local + Upval atoms (tags 6, 7)                      | unified into tag 6 with `"S"`/`"U"` storage marker; single handler                                                                 |   ~22  |
 | Generic-for `__iter` fallback in micro-VM            | force_gfor3 rewrites `for k,v in t do` into `for k,v in next, t, nil do`                                                           |   ~52  |
-| NumericFor step support                              | dropped — verified macro-VM never emits step                                                                                       |   ~80  |
+| NumericFor step support                              | dropped -- verified macro-VM never emits step                                                                                      |   ~80  |
 | Multi-target Assign for non-Local kinds              | rewrites single-target Assign by kind (Local/Upval → t==20, Global → t==22, Index → t==23); multi-target only sees Local           |  ~120  |
 | `if`/`elseif`/`else` IIFE in t==32                   | flattened to a single (cond, block) pair list                                                                                      |   ~40  |
 | Generic-for 2-slot flatten                           | inlines the slot pair directly in the atom                                                                                         |   ~12  |
 | Top-level return value (caller-side void)            | dropped: `Q(1)()(...)` instead of `return Q(1)()...`                                                                               |    ~7  |
-| `tp`/`tu` constants                                  | passed in as micro-VM parameters; `M` function doubles as the break sentinel                                                       |   ~50  |
+| `M` doubles as the break sentinel                    | no separate `local H = {}` allocation                                                                                              |    ~8  |
 | Various local-variable hoisting and code rearranging | shared `v`, `x`, `r` locals; `M(A[n], fr)` always uses P; etc.                                                                     |  ~200  |
-| **Total approx.**                                    |                                                                                                                                    | **~2750** |
+| **Total approx.**                                    |                                                                                                                                    | **~2725** |
 
-(Baseline 4708 → current 1955 = 2753 actual.)
+(Baseline 4708 → current 1997 = 2711 actual.)
 
 
 ## What the micro-VM contains
 
-In source order, the top-level function `function(K, F, E, tp, tu, ...)`:
+In source order, the top-level function `function(env, inputData,
+userEnv, label)`:
 
+* `local tp, tu = table.pack, table.unpack` — packed/unpack are
+  defined inside the micro-VM rather than passed in.
+* `local K, F = table.unpack(D.m, 1, 2)` — extract the macro-VM AST.
 * `local z, P, J, Q` — forward declarations for the four mutually
   recursive functions.
 * **`M(A, fr)`** — evaluates an atom list and returns `(packArray,
@@ -133,10 +135,11 @@ In source order, the top-level function `function(K, F, E, tp, tu, ...)`:
 * **`Q(ix, pa)`** — closure constructor. Reads `F[ix]`, builds the
   upvalue list `lr` from `pa` (the parent frame), and returns the
   inner closure that pushes a new frame and calls `J(Y.b, fr)`.
-* **`Q(1)()(...)`** — entry point. The macro-VM's main chunk is `F[1]`.
-  `Q(1)` builds the main-chunk closure (no parent frame); `()` invokes
-  it (no args — the main chunk takes none); `(...)` calls the
-  user-facing closure it returns with the caller's args.
+* **`Q(1)()(D.u, userEnv, label)`** — entry point. The macro-VM's main
+  chunk is `F[1]`. `Q(1)` builds the main-chunk closure (no parent
+  frame); `()` invokes it (no args -- the main chunk takes none);
+  `(D.u, userEnv, label)` is the user AST + env + label tuple passed
+  to the user-facing closure the main chunk returns.
 
 That's the whole micro-VM.
 
@@ -148,12 +151,17 @@ compiler) into a Python AST, applies optional rewrites, and emits
 either:
 
 * a Luau module `return {K, F}` (the default), or
-* a pure JSON document `[K, F]` (with `--json`).
+* a pure JSON document `[K, F]` (with `--json`), or
+* a combined payload `{m=[K,F], u=[K,F]}` / `{"m":[...],"u":[...]}`
+  (with `--user <user.bin>`, optionally with `--json`).
 
 The rewrites are gated on the `--for-micro` flag, which is only safe
 when the consumer is the micro-VM (not the macro-VM at runtime). For
 user programs, `--for-micro` is omitted so the macro-VM sees its
 native atom set.
+
+`tools/build.py` invokes the predecoder with `--for-micro` on
+`build/macrovm.bin` to produce `build/macrovm-ast.luau`.
 
 ### Rewrites applied with `--for-micro`
 
@@ -203,6 +211,8 @@ parent upvalue) — the form the macro-VM's source consumes natively.
 
 ### Output shape
 
+Single-input form (no `--user`):
+
 ```lua
 --!nocheck
 return {
@@ -214,14 +224,18 @@ return {
 }
 ```
 
-JSON form:
+JSON form: `[K, F]`.
 
-```json
-[
-  ["string", "byte", "table", ..., true, false],
-  [{"np": 0, "va": 1, "L": [], "b": [50, [...], [...]]}, ...]
-]
+Combined form (with `--user`):
+
+```lua
+--!nocheck
+return {m = {<macroK>, <macroF>}, u = {<userK>, <userF>}}
 ```
+
+JSON form: `{"m": [<macroK>, <macroF>], "u": [<userK>, <userF>]}`. The
+single-letter keys `m` and `u` match the micro-VM's accesses (`D.m` /
+`D.u`).
 
 
 ## Sentinels and signalling
@@ -256,15 +270,13 @@ values upward via `return x`.
   record), builds the upvalue array `lr` by indexing into `pa` with
   the storage marker, and returns the bound closure. No function
   literals in `F`; everything is reconstructed from data.
-* **No bytecode reader.** Earlier revisions had a varint/atom reader
-  taking ~1.1 KB. The predecoder emits Lua tables directly, so the
-  micro-VM never does I/O on a byte stream.
-* **`tp` / `tu` from the caller, not stdlib.** They're parameters of
-  the micro-VM (`function(K, F, E, tp, tu, ...)`). The bundle defines
-  `local tp, tu = table.pack, table.unpack` once at the top.
-* **User code as pre-decoded AST.** The macro-VM accepts either a
-  byte string or a pre-decoded `{K, F}` table as its first argument.
-  When given a table, it skips its bytecode reader and uses
-  `b[1]`, `b[2]` directly. This means user programs can also be
-  shipped in JSON (or any data-serialization) form, not just as
-  binary bytecode.
+* **No bytecode reader anywhere.** Earlier revisions had a varint/atom
+  reader in both the micro-VM (taking ~1.1 KB) and the macro-VM
+  (taking another ~1.5 KB). The predecoder produces both ASTs as
+  data, so neither needs a reader.
+* **`tp` / `tu` are internal.** The micro-VM aliases them from the
+  stdlib at startup with `local tp, tu = table.pack, table.unpack`.
+* **`inputData` carries everything.** The single `inputData` table the
+  caller passes contains both the macro-VM AST (`D.m`) and the user
+  program AST (`D.u`). The micro-VM extracts macro K/F at startup and
+  forwards user AST to the macro-VM main closure.

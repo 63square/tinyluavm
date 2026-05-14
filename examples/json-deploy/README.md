@@ -1,20 +1,18 @@
 # `json-deploy` example
 
 A complete, runnable example of feeding tinyvm an entirely JSON-encodable
-input plane: **both** the macro-VM AST **and** the user program are
-pre-decoded to JSON before launch, the launcher parses the JSON at
-startup, and the micro-VM gets pure-data tables.
+input plane: the macro-VM AST and the user program are pre-decoded
+**together** into a single JSON document, the launcher decodes that one
+string at startup, and the micro-VM gets a pure-data `inputData` table.
 
 Useful when:
 
-* You want a single, well-known serialization format (JSON) for every
-  payload tinyvm consumes -- no platform-specific bytecode files, no
-  Lua-syntax-only modules, just JSON strings you can store anywhere.
-* You want to ship the macro-VM AST and user programs over a wire that
-  only carries text (REST APIs, message queues, MessagePack-via-JSON
-  gateways, etc.).
-* You want the user-facing tooling (compiler + predecoder) to be the
-  same regardless of whether you're shipping the macro-VM or user code.
+* You want a single, well-known serialization format (JSON) for the
+  whole payload tinyvm consumes — no binary bytecode files, no
+  Lua-syntax-only modules, just one JSON string you can store anywhere.
+* You want to ship the macro-VM AST and your user program over a wire
+  that only carries text (REST APIs, message queues, MessagePack-via-
+  JSON gateways, etc.).
 
 
 ## Layout
@@ -22,22 +20,21 @@ Useful when:
 ```
 examples/json-deploy/
 ├── README.md              you are here
-├── build_and_run.py       driver: predecode + JSON-wrap everything, run luau
-├── launcher.luau          ★ the launcher: requires the modules and decodes
+├── build_and_run.py       driver: predecode + JSON-wrap + run luau
+├── launcher.luau          ★ the launcher: requires the modules, decodes
 ├── jsondec.luau           ~80-line JSON parser (object/array/string/number)
 ├── user.luau              a sample user program
 └── staged/                ↑ assembled by build_and_run.py, gitignored
     ├── tinyvm.luau            copy of src/tinyvm.luau
     ├── jsondec.luau           copy of ../jsondec.luau
     ├── launcher.luau          copy of ../launcher.luau
-    ├── macrovm-ast-json.luau  ModuleScript: returns {<json string>}
-    └── user-ast-json.luau     ModuleScript: returns {<json string>}
+    └── payload-json.luau      ModuleScript: returns {<json string>}
 ```
 
-The two `*-json.luau` modules just wrap a JSON string in a 1-element
-table (Roblox / standalone `luau` requires `require()` returns to be
-tables or functions, not bare strings). The wrappers are the **only**
-non-JSON parts of the payload, and they're trivial.
+The `payload-json.luau` module just wraps the JSON document in a
+1-element table (Roblox / standalone `luau` requires `require()`
+returns to be tables or functions, not bare strings). That wrapper
+is the **only** non-JSON part of the payload, and it's trivial.
 
 
 ## Run it
@@ -49,10 +46,9 @@ python examples/json-deploy/build_and_run.py
 Expected output:
 
 ```
-[json-deploy] predecoded macro-VM -> macrovm-ast.json (23115 bytes)
-[json-deploy] predecoded user.luau -> user-ast.json (2119 bytes)
-[json-deploy] wrapped JSON payloads as Luau modules
-[json-deploy] staged tinyvm.luau (1955 bytes), jsondec.luau, launcher.luau
+[json-deploy] predecoded macro-VM + user.luau -> payload.json (19319 bytes)
+[json-deploy] wrapped JSON payload as a Luau module
+[json-deploy] staged tinyvm.luau (1997 bytes), jsondec.luau, launcher.luau
 [json-deploy] invoking luau on staged/launcher.luau
 ============================================================
 == launcher: running user.luau (all data plane is JSON) ==
@@ -73,106 +69,103 @@ user.luau done
 ### Build pipeline (offline, in Python)
 
 1. `tools/compiler.py` compiles `src/macrovm.luau` to `macrovm.bin`
-   (already done by `tools/build.py` -- the driver reuses it).
-2. `tools/predecode.py --for-micro --json macrovm.bin macrovm-ast.json`
-   reads the macro-VM bytecode, applies all the micro-VM-specific atom
-   rewrites (BinOp -> Call(B<n>), Local/Upval unify, If flatten, etc.),
-   and emits a JSON file.
-3. `tools/compiler.py` compiles `user.luau` to `user.bin`.
-4. `tools/predecode.py --json user.bin user-ast.json` reads the user
-   bytecode and emits JSON. **No** `--for-micro` here -- the macro-VM
-   will consume this AST at runtime, so we keep the macro-VM-friendly
-   atom set (no Local/Upval unify, no BinOp rewrite, etc.).
+   (already done by `tools/build.py` — the driver reuses it).
+2. `tools/compiler.py` compiles `user.luau` to a temporary `.bin`.
+3. `tools/predecode.py build/macrovm.bin staged/payload.json
+   --for-micro --json --user user.bin` predecodes both into a single
+   combined JSON document:
 
-The result is two JSON files, both purely data: arrays, objects,
-strings, numbers, `true`, `false`, `null`. No functions, no userdata,
-no Lua-specific constructs.
+   ```json
+   {
+     "m": [<macroK>, <macroF>],
+     "u": [<userK>,  <userF>]
+   }
+   ```
+
+   The macro half has the micro-VM-specific rewrites applied
+   (`--for-micro`); the user half does not (the macro-VM consumes
+   the user AST at runtime and expects its native atom shape).
+
+The result is one JSON file, pure data: arrays, objects, strings,
+numbers, `true`, `false`, `null`. No functions, no userdata, no
+Lua-specific constructs.
 
 ### Runtime pipeline (inside luau)
 
-1. The launcher `require()`s the two JSON modules and gets two strings.
-2. It decodes them with `jsondec.luau` (a small JSON parser).
+1. The launcher `require()`s the wrapper module and gets a single
+   JSON string.
+2. It decodes the string with `jsondec.luau` (a small JSON parser).
 3. It builds the shadow env exposing the op-helper functions
-   (`B1`..`B14`, `U1`..`U3`) the predecoder rewrote macro-VM BinOp/UnOp
-   atoms into.
+   (`B1`..`B14`, `U1`..`U3`) the predecoder rewrote macro-VM
+   BinOp/UnOp atoms into.
 4. It calls the micro-VM:
 
    ```lua
-   micro(K, F, shadowEnv, table.pack, table.unpack,
-         userAst, userEnv, "user.luau")
+   micro(shadowEnv, inputData, userEnv, "user.luau")
    ```
 
-   Note that `userAst` is a **table** here, not a byte string. The
-   macro-VM (in `src/macrovm.luau`) detects this with
-   `type(b) == "table"` and skips its bytecode reader entirely,
-   pulling `K, F` from `userAst[1], userAst[2]`.
-
-If you JSON-stringify the launcher's inputs, you get something like:
-
-```json
-[
-  [/* K: const pool */],
-  [/* F: function records [{np, va, L, b}, ...] */]
-]
-```
-
-Both files have that shape.
+   `inputData` is the decoded `{m=..., u=...}` table.
 
 
 ## The user AST is also JSON
 
-The `user.luau` source compiles to ~250 bytes of bytecode; the
-predecoder turns that into ~2 KB of JSON. The JSON is bigger than the
-raw bytecode (varints are denser than decimal digits), but you can pipe
-it through any JSON-handling tool: pretty-print it, grep it, diff two
-versions of the same script, transform it with `jq`, etc.
+The `user.luau` source compiles to ~750 bytes of bytecode; the
+predecoder turns that into ~1.7 KB of JSON. The JSON is bigger than
+the raw bytecode (varints are denser than decimal digits), but you can
+pipe it through any JSON-handling tool: pretty-print it, grep it,
+diff two versions of the same script, transform it with `jq`, etc.
 
-Sample slice of the user AST:
+Sample slice of the combined payload:
 
 ```json
-[
-  [/* K: */ 2, 1, 0, 12, "print", "fib(", "tostring", ") = ", null, "next"],
-  [
-    {
-      "np": 0, "va": 1, "L": [],
-      "b": [50, [[31, [1], [[4, 9]]], ...], [2, 2, 7]]
-    },
-    {
-      "np": 1, "va": 0, "L": [[0, 1]],
-      "b": [50, [[32, ...], [37, ...]], [2, 3]]
-    }
+{
+  "m": [
+    ["table", "pack", "unpack", "getmetatable", ..., true, false],
+    [
+      {"np": 0, "va": 1, "L": [], "b": [50, [...], [...]]},
+      ...
+    ]
+  ],
+  "u": [
+    [2, 1, 0, 12, "print", "fib(", "tostring", ") = ", null],
+    [
+      {"np": 0, "va": 1, "L": [], "b": [50, [...], [...]]},
+      {"np": 1, "va": 0, "L": [[0, 1]], "b": [50, [...], [...]]}
+    ]
   ]
-]
+}
 ```
 
-* `K` is the constant pool: numbers, strings, `null`, `true`, `false`.
-* `F` is a list of function records: `np` = number of params,
-  `va` = vararg flag (0/1), `L` = upvalue source list `[[kind, idx], ...]`
-  where `kind` is `0` (parent local) or `1` (parent upvalue), and
-  `b` is the body atom tree (a tagged array `[tag, ...payload]`).
+* The two top-level keys `m` and `u` match the micro-VM's accesses
+  (`D.m` for the macro-VM AST, `D.u` for the user-program AST).
+* Each inner `[K, F]` is the usual `K` (constants) + `F`
+  (function records) pair.
+* Function records are objects `{np, va, L, b}`:
+  `np` = number of params, `va` = vararg flag (0/1), `L` = upvalue
+  source list, `b` = body atom tree.
 
 See `docs/bytecode-format.md` for the full atom-tag reference.
 
 
 ## Where this fits in the deployment matrix
 
-|                                  | bundle (Option 1)           | split deploy (Option 2)              | json deploy (this)                    |
-|----------------------------------|-----------------------------|--------------------------------------|---------------------------------------|
-| User-source code that ships      | one file (~25 KB)           | one file (`tinyvm.luau`, 1955 bytes) | one file (`tinyvm.luau`, 1955 bytes)  |
-| Macro-VM data format             | embedded Lua                | Lua module returning `{K, F}`        | JSON string                           |
-| User program data format         | binary bytecode             | binary bytecode                      | JSON string                           |
-| Launcher boilerplate             | none                        | ~75 lines                            | ~80 lines + a JSON parser             |
-| Source code can be diffed/jq'd?  | no                          | partially                            | yes -- everything                     |
+|                                  | split deploy                          | json deploy (this)                    |
+|----------------------------------|---------------------------------------|---------------------------------------|
+| User-source code that ships      | one file (`tinyvm.luau`, 1997 bytes)  | one file (`tinyvm.luau`, 1997 bytes)  |
+| Macro-VM data format             | Luau module returning `{K, F}`        | JSON string (combined with user)      |
+| User program data format         | Luau module returning `{K, F}`        | JSON string (combined with macro-VM)  |
+| Launcher boilerplate             | ~75 lines                             | ~70 lines + a JSON parser             |
+| Source code can be diffed/jq'd?  | partially (Lua syntax)                | yes -- everything                     |
 
-If you want JSON-style transport for all the data tinyvm consumes, this
-example is the recipe. Otherwise the bundle (Option 1) or the split
-deploy (Option 2) is more compact.
+If you want JSON-style transport for all the data tinyvm consumes,
+this example is the recipe. Otherwise the split deploy is more
+compact (no JSON parser).
 
 
 ## Customizing
 
-* **Streaming**: replace the `require()` calls with HTTP/GetAsync calls
-  to load the JSON strings from a remote service.
+* **Streaming**: replace the `require("./payload-json")` call with an
+  HTTP/GetAsync call to load the JSON string from a remote service.
 * **Restricting the user env**: replace the `__index = _G` chain with
   a curated table to sandbox.
 * **Replacing the JSON parser**: any JSON parser that produces nested

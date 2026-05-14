@@ -1,39 +1,39 @@
 # tinyvm
 
-**A Luau interpreter for Luau, in 1955 bytes of Luau source.**
+**A Luau interpreter for Luau, in 1997 bytes of Luau source.**
 
 `tinyvm` is a two-stage Luau-in-Luau interpreter. The thing that lives in
-your project is a 1.9 KB micro-VM (`src/tinyvm.luau`). It expects a
+your project is a 2 KB micro-VM (`src/tinyvm.luau`). It expects a
 caller-supplied "macro-VM" — the full feature-complete interpreter,
-pre-decoded at build time into pure-data `(K, F)` tables — and then runs
-your user code on top of that macro-VM.
+pre-decoded at build time into pure-data `(K, F)` tables — and runs
+your user code through it.
 
 Every input to the micro-VM is a plain Lua value (number, string, bool,
 nil, table). There are no userdata, no function literals, no opaque
-blobs. That means the macro-VM AST round-trips losslessly through JSON,
-and so does the user program if you predecode it too.
+blobs. The macro-VM AST and the user program (also pre-decoded) round-
+trip losslessly through JSON.
 
 ```
    ┌──────────────────────────────────────────────────────────────────┐
-   │ src/tinyvm.luau   (1955 bytes — this is what ships)              │
+   │ src/tinyvm.luau   (1997 bytes — this is what ships)              │
    │   interprets → macro-VM AST  (pre-decoded from src/macrovm.luau) │
-   │                  interprets → user code (bytes or pre-decoded)   │
+   │                  interprets → user AST (pre-decoded from .luau)  │
    └──────────────────────────────────────────────────────────────────┘
 ```
 
-The trick: the macro-VM AST and the op-helper env both come from the
-*caller*, so they don't count against `tinyvm`. The micro-VM only has to
-handle the small subset of Luau features the macro-VM itself uses — and
-all of those have been further reduced by build-time atom rewrites that
-fold opcodes the micro-VM would otherwise need to dispatch.
+The trick: both the macro-VM AST and the user-program AST are *data*
+that the caller supplies — they don't count against the size of the
+shipped `tinyvm.luau`. The micro-VM only has to handle the small subset
+of Luau features the macro-VM itself uses, and all of those are further
+reduced by build-time atom rewrites that fold opcodes the micro-VM
+would otherwise need to dispatch.
 
 
 ## What you get
 
 * **103 internal tests pass** (35 core + 35 edge cases + 33 type-stripping).
 * **All example programs pass** (closures, coroutines, fibonacci,
-  hello, metatables) under both the all-in-one bundle and the all-JSON
-  deployment path.
+  hello, metatables).
 * **Roblox-compatible**. No `loadstring`, no `load`, no `debug.*`. Just
   `require`, `setmetatable`, basic stdlib.
 * **Every Luau feature** the macro-VM exposes: closures, multi-return,
@@ -43,47 +43,66 @@ fold opcodes the micro-VM would otherwise need to dispatch.
   type annotations (parsed and discarded). The micro-VM doesn't need to
   implement these directly — the macro-VM does, and the micro-VM just
   needs to interpret the macro-VM.
-* **JSON-encodable input plane**. The macro-VM AST and (optionally) the
-  user program AST are both pure data — JSON serializable, diffable,
-  hashable, transformable with `jq`.
+* **JSON-encodable input plane**. The macro-VM AST and the user program
+  AST combine into a single `inputData` payload — pure data, JSON
+  serializable, diffable, hashable, transformable with `jq`.
 
 
 ## Layout
 
     src/
-      tinyvm.luau          micro-VM — the 1955-byte interpreter
+      tinyvm.luau          micro-VM — the 1997-byte interpreter
       macrovm.luau         macro-VM source (Luau) — readable reference;
                            compiled and pre-decoded at build time
     tools/
       compiler.py          offline Luau → bytecode compiler
-      predecode.py         compiles a .bin into a Lua `return {K, F}`
-                           module (or JSON, with --json); applies
-                           atom-shrinking rewrites if --for-micro
-      build.py             builds build/macrovm.bin + macrovm-ast.luau +
-                           the self-contained bundle
-      tinyvm.py            CLI wrapper for compile + run
-      test.py              test runner (strict: silent passes fail)
+      predecode.py         compiles a .bin into a Luau module (or JSON,
+                           with --json) of shape {K, F}. With --user
+                           also predecodes a user program and emits a
+                           combined `{m={K,F}, u={K,F}}` payload.
+      build.py             builds build/macrovm.bin and build/macrovm-ast.luau
+      tinyvm.py            CLI wrapper: compile + run a single .luau file
+      test.py              test runner
     build/                 generated artifacts (after `python tools/build.py`)
       macrovm.bin          compiled macro-VM bytecode (reference only)
       macrovm-ast.luau     pre-decoded macro-VM as `return {K, F}`
-      tinyvm-bundled.luau  self-contained: micro-VM + AST + op helpers
-    examples/              example programs you can run via tinyvm.py
-      split-deploy/        Option 2 (split deploy) end-to-end example
-      json-deploy/         all-JSON input plane end-to-end example
-    tests/internal/        test suite
-    docs/                  format spec + architecture notes
+    examples/              example programs and end-to-end recipes
+      split-deploy/        split deploy: separate modules for tinyvm,
+                           macro-VM AST, user-program AST
+      json-deploy/         all-JSON: single combined JSON document
+                           covering everything
+
+
+## API
+
+The micro-VM is a single function:
+
+```lua
+micro(env, inputData, userEnv, label)
+```
+
+| argument    | what it is                                                       |
+|-------------|------------------------------------------------------------------|
+| `env`       | env the macro-VM uses for its own globals; must include the op   |
+|             | helpers `B1`..`B14` (binary ops) and `U1`..`U3` (unary ops)      |
+| `inputData` | `{m = macroAst, u = userAst}` where each is `{K, F}`             |
+| `userEnv`   | what user code sees as its `_G` (a normal table)                 |
+| `label`     | chunk name shown in `error()` diagnostics                        |
+
+`table.pack` and `table.unpack` are looked up internally by the
+micro-VM; you don't pass them in.
 
 
 ## Quickstart
 
 ```bash
-# 1. Build the macro-VM AST and the self-contained bundle.
+# 1. Build the macro-VM and predecode it.
 python tools/build.py
 
 # 2. Compile and run a Luau source file.
 python tools/tinyvm.py run examples/fibonacci.luau
 
-# 3. Or compile a .luau to bytecode and run it yourself.
+# 3. Or compile a .luau to bytecode on its own.
 python tools/tinyvm.py compile examples/fibonacci.luau out.bin
 ```
 
@@ -96,111 +115,67 @@ python tools/test.py
 
 ## Using it in your own Luau code
 
-### Option 1: Self-contained bundle (simplest)
+There are two deployment recipes shipped as runnable examples; both
+have the same shape and only differ in how the data is transported.
 
-After `python tools/build.py`, `build/tinyvm-bundled.luau` is a single
-file you can drop into your project. It returns a function:
+### Split deploy (separate modules)
 
-```lua
-local play = require("./tinyvm-bundled")
--- play(userBytecode, env, label, ...)
--- userBytecode: string produced by tools/compiler.py
--- env:          table providing globals to the user program
--- label:        short string used in error messages
--- ...:          extra args forwarded to the user program's main chunk
-
-local userBytecode = "..."  -- the .bin compiled offline
-local env = setmetatable({}, {__index = _G})  -- writable shadow of _G
-env._G = env
-play(userBytecode, env, "myscript.luau")
-```
-
-The bundle wraps your `env` in a shadow table that exposes the op-helper
-functions (`B1`..`B14` for binary ops, `U1`..`U3` for unary ops) the
-predecoder rewrote BinOp/UnOp atoms into; the shadow `__index`-falls
-through to your `env`, which in turn typically falls through to `_G`.
-
-### Option 2: Split deploy (smallest user-facing source)
-
-If the Luau source size you ship matters and you can supply the
-macro-VM data through another channel:
+Ship three Luau modules: `tinyvm`, the predecoded macro-VM AST, and
+the predecoded user-program AST. Your launcher `require()`s the three
+and combines the two ASTs into `inputData`. Code lives in
+[`examples/split-deploy/`](examples/split-deploy/).
 
 ```lua
-local micro    = require("./tinyvm")             -- 1955-byte module
-local ast      = require("./macrovm-ast")        -- returns {K, F}
-local K, F     = ast[1], ast[2]
-local env      = ...   -- shadow env with B1..B14, U1..U3 + user globals
-local tp, tu   = table.pack, table.unpack
+local micro   = require("./tinyvm")
+local mvmAst  = require("./macrovm-ast")  -- returns {K, F}
+local userAst = require("./user-ast")     -- returns {K, F}
 
--- micro(K, F, env, tp, tu, userBytecode, userEnv, label, ...)
-micro(K, F, env, tp, tu, userBytecode, userEnv, label)
+local userEnv = setmetatable({}, {__index = _G})
+userEnv._G = userEnv
+
+-- Shadow env exposing the op helpers; falls through to userEnv -> _G.
+local shadowEnv = setmetatable({
+    B1  = function(a, b) return a + b  end,   -- ...
+    -- ... 13 more binops and 3 unops; see examples for the full list.
+}, {__index = userEnv})
+
+micro(shadowEnv, {m = mvmAst, u = userAst}, userEnv, "user.luau")
 ```
 
-`build/macrovm-ast.luau` is a ready-to-use ModuleScript-style file that
-returns `{K, F}` — it's a Lua expression, not raw bytes. The build
-pipeline produces it from `src/macrovm.luau` via `tools/predecode.py`.
-Wire it up in your own way (an asset, a `ModuleScript`, a generated
-string literal, etc.).
+### All-JSON deploy (one document)
 
-Notes:
-
-* The third argument to `micro` is the env the **macro-VM** uses to
-  resolve its own globals (`string.byte`, `error`, plus the op helpers
-  `B1`..`B14`, `U1`..`U3`). It must contain those names or fall through
-  to a table that does. The bundle's `_E(e)` helper builds one for you.
-* The 7th argument (the user's env) is what user code sees as its `_G`.
-  It's just a normal table.
-
-The bundle (Option 1) is the recommended path unless source size is
-critical. See [`examples/split-deploy/`](examples/split-deploy/) for a
-complete, runnable example of this recipe — including the launcher
-script you'd write, a sample user program, and a driver that assembles
-the staged module tree.
-
-### Option 3: All-JSON deploy
-
-If you want every input tinyvm consumes to be JSON-serializable:
-predecode the macro-VM AST and the user program both to JSON, decode
-them at runtime, and feed the resulting tables to the micro-VM.
+Predecode the macro-VM and the user program together into one JSON
+document of shape `{"m": [K, F], "u": [K, F]}`, then decode it at
+runtime with any JSON parser. The launcher passes the decoded table
+directly to the micro-VM as `inputData`. Code lives in
+[`examples/json-deploy/`](examples/json-deploy/).
 
 ```bash
-# 1. Predecode the macro-VM with the micro-VM-specific rewrites.
-python tools/predecode.py build/macrovm.bin macrovm-ast.json --for-micro --json
-
-# 2. Predecode the user program WITHOUT --for-micro: the macro-VM (not
-#    the micro-VM) consumes it, so only macro-VM-compatible atoms are OK.
 python tools/compiler.py myscript.luau myscript.bin
-python tools/predecode.py myscript.bin myscript-ast.json --json
+python tools/predecode.py build/macrovm.bin payload.json \
+    --for-micro --json --user myscript.bin
 ```
-
-Both files are JSON documents of the shape `[K, F]`. At runtime your
-launcher decodes them, builds the same shadow env as in Option 2, and
-calls:
 
 ```lua
-local userAst = json.decode(...)   -- {K, F}
--- The macro-VM detects type(b)=="table" and skips its bytecode reader.
-micro(macroK, macroF, shadowEnv, tp, tu, userAst, userEnv, "myscript.luau")
-```
+local micro     = require("./tinyvm")
+local decode    = require("./jsondec")
+local inputData = decode(loadPayloadJsonSomehow())
 
-See [`examples/json-deploy/`](examples/json-deploy/) for a complete,
-runnable example -- launcher, JSON decoder, and driver that assembles
-the staged module tree.
+-- ... build shadowEnv and userEnv as above ...
+micro(shadowEnv, inputData, userEnv, "myscript.luau")
+```
 
 
 ## How small is it really?
 
-Source-line counts:
-
 ```
-src/tinyvm.luau          1955 bytes  ← the deliverable
-src/macrovm.luau         6873 bytes  ← reference; gets compiled away
-build/macrovm.bin        5850 bytes  ← compact bytecode form of macrovm.luau
-build/macrovm-ast.luau  ~22600 bytes ← pre-decoded as Lua source (or JSON)
-build/tinyvm-bundled.luau ~25700 bytes ← micro-VM + AST + helpers (drop-in)
+src/tinyvm.luau          1997 bytes  ← the deliverable
+src/macrovm.luau         5221 bytes  ← reference; gets compiled away
+build/macrovm.bin        4384 bytes  ← compact bytecode form of macrovm.luau
+build/macrovm-ast.luau  ~17100 bytes ← pre-decoded as Lua source (or JSON)
 ```
 
-The 1955-byte figure covers the entire tree-walker: expression
+The 1997-byte figure covers the entire tree-walker: expression
 evaluation, multi-return / multi-assign, table construction, closure
 binding (via `Q`, which builds upvalues from pure-data records), all
 five flavors of loop, `if`/`elseif`/`else`, `return`/`break`, and
@@ -212,15 +187,14 @@ the macro-VM that runs on top of it.
 
 * **No `loadstring` / `load`.** Roblox restricts these on the client; the
   whole design avoids them.
-* **Build-time pre-decoding is required.** Earlier revisions of the
-  micro-VM shipped a bytecode reader; this version does not. The macro-VM
-  AST is supplied as `(K, F)` Lua tables — pure data, no function
-  literals — produced by `tools/predecode.py`. If you invoke
-  `tools/build.py`, this happens automatically.
+* **Build-time pre-decoding is required for everything.** Both the
+  macro-VM AST and the user program AST are pure-data tables produced
+  by `tools/predecode.py`. There is no runtime bytecode reader.
 * **The op-helper env is required.** The predecoder rewrites every
-  BinOp/UnOp atom in the macro-VM into a Call atom that looks up
-  `B1`..`B14` / `U1`..`U3` in the env. Your env must expose them. The
-  bundled file does this for you.
+  macro-VM BinOp/UnOp atom into a Call atom that looks up `B1`..`B14`
+  / `U1`..`U3` in the env. Your env must expose them. Both example
+  launchers do this with a shadow env that falls through to the user
+  env.
 * **The macro-VM is a specific Luau program.** As shipped, the micro-VM
   is matched to the atom set `src/macrovm.luau` emits after the
   predecoder runs. If you want to swap in a completely different

@@ -1,28 +1,24 @@
 --!nocheck
 -- All-JSON-deploy launcher for tinyvm.
 --
--- Everything we feed into the micro-VM (the macro-VM AST and the user
--- program) is JSON-serialized. The launcher is responsible for:
+-- The driver predecodes the macro-VM and the user program together into
+-- a single JSON document of shape:
 --
---   1. Loading the JSON payloads as strings (here via `require()`s; in
---      a real project you'd HttpGet them, read them from an asset, etc.).
---   2. Decoding them with a JSON parser (we include a small one in
---      jsondec.luau).
---   3. Wiring up the shadow env that exposes the op-helper functions the
---      predecoder rewrote BinOp/UnOp atoms into.
---   4. Calling the micro-VM with the decoded structures.
+--   {"m": [macroK, macroF], "u": [userK, userF]}
 --
--- The point of this example: the entire data-plane is JSON. You could
--- replace any of the require() calls with HttpService:GetAsync(), or with
--- a JSON payload pasted into a string literal at build time, etc.
+-- The launcher decodes that one string with a small JSON parser and hands
+-- the resulting table to the micro-VM as its `inputData` argument.
+--
+-- Everything tinyvm consumes from us is plain Lua data: numbers, strings,
+-- booleans, nil, tables. No userdata, no opaque blobs.
 local micro    = require("./tinyvm")
 local decode   = require("./jsondec")
 
-local macroAst = decode(require("./macrovm-ast-json")[1])
-local userAst  = decode(require("./user-ast-json")[1])
-
-local K, F   = macroAst[1], macroAst[2]
-local tp, tu = table.pack, table.unpack
+-- The driver wrapped the JSON document in a 1-element table so it could
+-- come through `require()` (which rejects modules whose body returns a
+-- bare string). Replace this with whatever channel makes sense for you:
+-- HttpService:GetAsync, an asset, a string literal pasted at build time.
+local inputData = decode(require("./payload-json")[1])
 
 -- The env the user program sees as `_G`. A writable shadow of `_G` is
 -- usually fine; restrict or extend as needed.
@@ -56,12 +52,13 @@ local shadowEnv = setmetatable({
     U3  = function(a) return #a end,
 }, {__index = userEnv})
 
--- The macro-VM can be fed either bytecode bytes (string) OR a pre-decoded
--- AST table. Here we pass the table directly -- no bytecode reader runs.
+-- micro(env, inputData, userEnv, label)
+--   env       - the env the macro-VM uses for its own globals + helpers
+--   inputData - {m = macro-VM AST, u = user-program AST}
+--   userEnv   - what user code sees as its _G
+--   label     - chunk name shown in diagnostic messages
 print("== launcher: running user.luau (all data plane is JSON) ==")
-local ok, err = pcall(
-    micro, K, F, shadowEnv, tp, tu, userAst, userEnv, "user.luau"
-)
+local ok, err = pcall(micro, shadowEnv, inputData, userEnv, "user.luau")
 if not ok then
     print("== launcher: user program raised an error ==")
     print(tostring(err))
