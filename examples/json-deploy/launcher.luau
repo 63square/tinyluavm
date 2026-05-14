@@ -6,11 +6,10 @@
 --
 --   {"m": [macroK, macroF], "u": [userK, userF]}
 --
--- The launcher decodes that one string with a small JSON parser and hands
--- the resulting table to the micro-VM as its `inputData` argument.
---
--- Everything tinyvm consumes from us is plain Lua data: numbers, strings,
--- booleans, nil, tables. No userdata, no opaque blobs.
+-- The launcher decodes that one string with a small JSON parser and
+-- hands the resulting table to the micro-VM. The caller's env is
+-- passed via `getfenv()` -- the macro-VM resolves any global the user
+-- program references through the same table.
 local micro    = require("./tinyvm")
 local decode   = require("./jsondec")
 
@@ -20,26 +19,12 @@ local decode   = require("./jsondec")
 -- HttpService:GetAsync, an asset, a string literal pasted at build time.
 local inputData = decode(require("./payload-json")[1])
 
--- The env the user program sees as `_G`. A writable shadow of `_G` is
--- usually fine; restrict or extend as needed. The micro-VM handles
--- BinOp/UnOp natively, so no shadow env is needed -- the macro-VM
--- resolves its own globals through this same table.
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G = userEnv
-userEnv.hostInfo = {
+hostInfo = {
     appName    = "tinyvm-json-deploy-example",
     appVersion = "1.0",
 }
 
--- micro(inputData, userEnv, label)
---   inputData - {m = macro-VM AST, u = user-program AST}
---   userEnv   - what user code sees as its _G
---   label     - chunk name shown in diagnostic messages
-print("== launcher: running user.luau (all data plane is JSON) ==")
-local ok, err = pcall(micro, inputData, userEnv, "user.luau")
+local ok, err = pcall(micro, inputData, getfenv())
 if not ok then
-    print("== launcher: user program raised an error ==")
-    print(tostring(err))
-else
-    print("== launcher: user program finished cleanly ==")
+    print("user program raised: " .. tostring(err))
 end

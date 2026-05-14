@@ -3,12 +3,12 @@
 A complete, runnable example of shipping tinyvm as three separate Luau
 modules:
 
-1. `tinyvm.luau` — the 2472-byte micro-VM.
+1. `tinyvm.luau` — the 2485-byte micro-VM.
 2. `macrovm-ast.luau` — the pre-decoded macro-VM AST (`return {K, F}`).
 3. `user-ast.luau` — the pre-decoded user program (`return {K, F}`).
 
 The launcher `require()`s all three, combines the two ASTs into the
-micro-VM's `inputData` argument, and calls `micro(...)`.
+micro-VM's `inputData` argument, and calls `micro(inputData, getfenv())`.
 
 This is the layout you'd use when:
 
@@ -56,14 +56,13 @@ it.
 Expected output:
 
 ```
-[split-deploy] staged tinyvm.luau (2472 bytes)
-[split-deploy] staged macrovm-ast.luau (15742 bytes)
+[split-deploy] staged tinyvm.luau (2485 bytes)
+[split-deploy] staged macrovm-ast.luau (13816 bytes)
 [split-deploy] compiled user.luau (1489 bytes of bytecode)
 [split-deploy] predecoded user.luau -> user-ast.luau (3916 bytes)
 [split-deploy] staged launcher.luau
 [split-deploy] invoking luau on staged/launcher.luau
 ============================================================
-== launcher: starting user program ==
 hello from tinyvm-split-deploy-example v1.0
 first three ids: 101, 102, 103
 stats: sum=44 count=11 mean=4
@@ -72,10 +71,9 @@ basket total: 8.85
 a = Vec(3, 4), |a| = 5
 a + b = Vec(4, 6)
 10 / 2 ok=true result=5
-10 / 0 ok=false err=user.luau:79: division by zero
+10 / 0 ok=false err=division by zero
 countdown: 5 4 3 2 1
 user.luau done
-== launcher: user program finished cleanly ==
 ============================================================
 [split-deploy] done
 ```
@@ -88,19 +86,16 @@ user.luau done
 This is what you'd actually write in a real project. It:
 
 1. `require()`s the three Luau modules:
-   * `./tinyvm`      — the 2472-byte micro-VM, a function value.
+   * `./tinyvm`      — the 2485-byte micro-VM, a function value.
    * `./macrovm-ast` — a `{K, F}` table for the macro-VM.
    * `./user-ast`    — a `{K, F}` table for the user program.
-2. Combines the two ASTs into `inputData = {m = mvmAst, u = userAst}`.
-3. Calls the micro-VM. (The micro-VM handles BinOp/UnOp atoms
-   natively, so no shadow env exposing op helpers is needed.)
+2. Optionally injects host globals (`hostInfo = ...`).
+3. Calls `micro({m = mvmAst, u = userAst}, getfenv())`.
 
-   ```lua
-   micro(inputData, userEnv, "user.luau")
-   ```
-
-The call is wrapped in `pcall` so an uncaught user error prints
-cleanly instead of taking down the host script.
+The whole launcher is ~25 lines. No shadow env construction, no
+helper-function wiring, no chunk-name plumbing — the micro-VM
+handles arithmetic, error propagation, and stdlib lookup directly
+through the env table you pass in.
 
 ### `user.luau` (the user program)
 
@@ -109,7 +104,7 @@ upvalues, varargs, multi-return, generic-for over a hash table, a
 metatable with `__index` / `__add` / `__tostring`, `pcall` + `assert`,
 string interpolation, compound assignment, numeric-for with a
 negative step, and access to a host-provided global (`hostInfo`,
-which the launcher injects via the user env).
+which the launcher injects via the env).
 
 If you can break any of this, please [open an issue](../../../../issues).
 
@@ -136,10 +131,19 @@ the four files as a separate `ModuleScript`.
 
 ## Customizing
 
-* **Restricting what the user sees.** The launcher sets `userEnv`'s
-  `__index` to `_G`. Replace it with a curated table to sandbox.
-* **Injecting host APIs.** Add fields to `userEnv` before calling
-  the micro-VM — they show up as globals in user code.
+* **Restricting what the user sees.** Pass a curated table as the
+  second argument instead of `getfenv()`. For example:
+  ```lua
+  local sandbox = {print=print, math=math}
+  micro({m=mvmAst, u=userAst}, sandbox)
+  ```
+* **Injecting host APIs.** Write to globals before the call;
+  `getfenv()` will pick them up:
+  ```lua
+  hostInfo = {appName = "my-game"}
+  myGameAPI = {spawn = function(x, y) ... end}
+  micro({m=mvmAst, u=userAst}, getfenv())
+  ```
 * **Different transport for the ASTs.** The launcher uses `require()`,
   but the modules can come from anywhere: a Roblox `ModuleScript`,
   generated string literals, etc. Replace `require("./macrovm-ast")`

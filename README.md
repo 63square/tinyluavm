@@ -1,6 +1,6 @@
 # tinyvm
 
-**A Luau interpreter for Luau, in 2472 bytes of Luau source.**
+**A Luau interpreter for Luau, in 2485 bytes of Luau source.**
 
 `tinyvm` is a two-stage Luau-in-Luau interpreter. The thing that lives in
 your project is a 2.5 KB micro-VM (`src/tinyvm.luau`). It expects a
@@ -15,7 +15,7 @@ trip losslessly through JSON.
 
 ```
    ┌──────────────────────────────────────────────────────────────────┐
-   │ src/tinyvm.luau   (2472 bytes — this is what ships)              │
+   │ src/tinyvm.luau   (2485 bytes — this is what ships)              │
    │   interprets → macro-VM AST  (pre-decoded from src/macrovm.luau) │
    │                  interprets → user AST (pre-decoded from .luau)  │
    └──────────────────────────────────────────────────────────────────┘
@@ -46,15 +46,16 @@ would otherwise need to dispatch.
 * **JSON-encodable input plane**. The macro-VM AST and the user program
   AST combine into a single `inputData` payload — pure data, JSON
   serializable, diffable, hashable, transformable with `jq`.
-* **Simple 3-argument API**. The caller passes the combined `inputData`,
-  a plain user env, and a chunk label. No shadow env construction, no
-  op-helper wiring.
+* **Trivial API**. The caller passes the combined `inputData` and an
+  optional env table. `micro(data)` works; `micro(data, getfenv())`
+  is the same thing written explicitly. No shadow env construction,
+  no op-helper wiring, no chunk-name plumbing.
 
 
 ## Layout
 
     src/
-      tinyvm.luau          micro-VM — the 2472-byte interpreter
+      tinyvm.luau          micro-VM — the 2485-byte interpreter
       macrovm.luau         macro-VM source (Luau) — readable reference;
                            compiled and pre-decoded at build time
     tools/
@@ -83,16 +84,18 @@ would otherwise need to dispatch.
 The micro-VM is a single function:
 
 ```lua
-micro(inputData, userEnv, label)
+micro(inputData, userEnv?)
 ```
 
 | argument    | what it is                                                       |
 |-------------|------------------------------------------------------------------|
 | `inputData` | `{m = macroAst, u = userAst}` where each is `{K, F}`             |
-| `userEnv`   | what user code sees as its `_G`; usually a writable shadow of    |
-|             | `_G`. The macro-VM resolves its own globals (`string`, `table`,  |
-|             | `error`, ...) through the same table.                            |
-| `label`     | chunk name shown in `error()` diagnostics                        |
+| `userEnv`   | env table the user program sees as its globals. Defaults to     |
+|             | `getfenv(2)` (the caller's environment) if omitted, so writes   |
+|             | to globals inside the user program become visible in the        |
+|             | caller's scope.                                                  |
+|             | The macro-VM resolves its own stdlib references (`string`,      |
+|             | `table`, `error`, ...) through the same table.                  |
 
 `table.pack`, `table.unpack`, and the arithmetic-op handlers are
 implemented inside the micro-VM; you don't pass them in.
@@ -136,10 +139,7 @@ local micro   = require("./tinyvm")
 local mvmAst  = require("./macrovm-ast")  -- returns {K, F}
 local userAst = require("./user-ast")     -- returns {K, F}
 
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G = userEnv
-
-micro({m = mvmAst, u = userAst}, userEnv, "user.luau")
+micro({m = mvmAst, u = userAst}, getfenv())
 ```
 
 ### All-JSON deploy (one document)
@@ -161,10 +161,7 @@ local micro     = require("./tinyvm")
 local decode    = require("./jsondec")
 local inputData = decode(loadPayloadJsonSomehow())
 
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G = userEnv
-
-micro(inputData, userEnv, "myscript.luau")
+micro(inputData, getfenv())
 ```
 
 ### HTTP deploy (payload fetched at runtime)
@@ -183,23 +180,20 @@ local decode      = require(script.jsondec)
 local body      = HttpService:GetAsync("https://your-server/payload.json")
 local inputData = decode(body)
 
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G = userEnv
-
-micro(inputData, userEnv, "myscript.luau")
+micro(inputData, getfenv())
 ```
 
 
 ## How small is it really?
 
 ```
-src/tinyvm.luau          2472 bytes  ← the deliverable
-src/macrovm.luau         5221 bytes  ← reference; gets compiled away
-build/macrovm.bin        4384 bytes  ← compact bytecode form of macrovm.luau
-build/macrovm-ast.luau  ~15700 bytes ← pre-decoded as Lua source (or JSON)
+src/tinyvm.luau          2485 bytes  ← the deliverable
+src/macrovm.luau         4695 bytes  ← reference; gets compiled away
+build/macrovm.bin        3774 bytes  ← compact bytecode form of macrovm.luau
+build/macrovm-ast.luau  ~13800 bytes ← pre-decoded as Lua source (or JSON)
 ```
 
-The 2472-byte figure covers the entire tree-walker: expression
+The 2485-byte figure covers the entire tree-walker: expression
 evaluation, all 14 binary operators, all 3 unary operators, multi-
 return / multi-assign, table construction, closure binding (via `Q`,
 which builds upvalues from pure-data records), all five flavors of

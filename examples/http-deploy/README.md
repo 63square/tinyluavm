@@ -46,27 +46,23 @@ python examples/http-deploy/build_and_run.py
 Expected output:
 
 ```
-[http-deploy] built combined payload -> payload.json (17558 bytes)
+[http-deploy] built combined payload -> payload.json (15612 bytes)
 [http-deploy] server up at http://127.0.0.1:XXXXX (serving payload.json)
 [http-deploy] GET http://127.0.0.1:XXXXX/payload.json
-[http-deploy]   HTTP 200, 17558 bytes (Server: BaseHTTP/0.6 Python/3.14.2)
-[http-deploy] staged tinyvm.luau (2472 bytes), jsondec.luau, launcher.luau
+[http-deploy]   HTTP 200, 15612 bytes (Server: BaseHTTP/0.6 Python/3.14.2)
+[http-deploy] staged tinyvm.luau (2485 bytes), jsondec.luau, launcher.luau
 [http-deploy] staged httpget.luau (...) chars
 [http-deploy] staged config.luau (...) chars
 [http-deploy] invoking luau on staged/launcher.luau
 ============================================================
-== launcher: GET http://127.0.0.1:XXXXX/payload.json ==
-fetched 17558 bytes; decoding...
-== launcher: starting user program ==
 hello from tinyvm-http-deploy-example
 served by   : BaseHTTP/0.6 Python/3.14.2
 fetched from: http://127.0.0.1:XXXXX/payload.json
-payload size: 17558 bytes
+payload size: 15612 bytes
 
 primes below 50 (15 total): 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47
 sum of those primes: 328
 user.luau done
-== launcher: user program finished cleanly ==
 ============================================================
 [http-deploy] done
 ```
@@ -144,16 +140,15 @@ identical.
    local body      = httpGet(config.payloadUrl)
    local inputData = decode(body)
 
-   local userEnv = setmetatable({}, {__index = _G})
-   userEnv._G    = userEnv
-   userEnv.hostInfo = { -- ... server metadata for the user program ... }
+   hostInfo = { -- ... server metadata for the user program ... }
 
-   micro(inputData, userEnv, "user.luau")
+   micro(inputData, getfenv())
    ```
 
 4. The user program runs. It can see the URL it was fetched from,
    the server's `Server:` header, the payload byte count -- because
-   the launcher passed all those facts through `hostInfo`.
+   the launcher wrote those facts to `hostInfo` in its own env, and
+   `getfenv()` hands that same env table to the user program.
 
 
 ## Where this fits in the deployment matrix

@@ -21,29 +21,26 @@ macro-VM AST, and the predecoded user-program AST. Your launcher
 The micro-VM signature is:
 
 ```lua
-micro(inputData, userEnv, label)
+micro(inputData, userEnv?)
 ```
 
 * `inputData` — `{m = macroAst, u = userAst}` where each entry is
   `{K, F}` (a constant pool + function records list, produced by
   `tools/predecode.py`).
-* `userEnv` — what user code sees as its `_G`. The macro-VM resolves
-  its own globals (`string`, `table`, `error`, ...) through the same
-  table. A writable shadow of `_G` with `__index = _G` is typical.
-* `label` — chunk name shown in `error()` diagnostics.
+* `userEnv` — what user code sees as its globals namespace. Defaults
+  to `getfenv(2)` (the caller's environment) when omitted, so the
+  user program can read and write the caller's globals directly. The
+  macro-VM resolves its own stdlib references (`string`, `table`,
+  `error`, ...) through the same table.
 
 Concrete example wiring it up yourself:
 
 ```lua
-local micro   = require("./tinyvm")               -- 2472-byte module
+local micro   = require("./tinyvm")               -- 2485-byte module
 local mvmAst  = require("./macrovm-ast")          -- returns {K, F}
 local userAst = require("./user-ast")             -- returns {K, F}
 
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G    = userEnv
-
--- No shadow env needed. The micro-VM handles BinOp/UnOp natively.
-micro({m = mvmAst, u = userAst}, userEnv, "myscript.luau")
+micro({m = mvmAst, u = userAst}, getfenv())
 ```
 
 See [`split-deploy/`](split-deploy/) for a complete runnable example
@@ -77,10 +74,7 @@ local micro     = require("./tinyvm")
 local decode    = require("./jsondec")           -- bring-your-own
 local inputData = decode(loadPayloadJsonSomehow())
 
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G    = userEnv
-
-micro(inputData, userEnv, "myscript.luau")
+micro(inputData, getfenv())
 ```
 
 See [`json-deploy/`](json-deploy/) for a complete runnable example
@@ -104,10 +98,7 @@ local decode      = require(script.jsondec)
 local body      = HttpService:GetAsync("https://your-server/payload.json")
 local inputData = decode(body)
 
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G    = userEnv
-
-micro(inputData, userEnv, "myscript.luau")
+micro(inputData, getfenv())
 ```
 
 See [`http-deploy/`](http-deploy/) for a complete runnable example
@@ -136,43 +127,56 @@ The bytecode is a flat binary blob. It's an intermediate artifact;
 to feed it to the micro-VM you still need to predecode it with
 `tools/predecode.py`.
 
-## What the env table needs
+## Picking an env table
 
-The user program sees the env as its `_G`. At minimum populate it
-with whatever standard library functions and host APIs the user program
-needs:
+The user program sees the `userEnv` table as its globals namespace.
+The macro-VM looks up its own stdlib references (`string`, `table`,
+`error`, `tostring`, ...) through the same table.
+
+The simplest pick is `getfenv()`, which returns whatever environment
+the calling script is running in. On Roblox that's the script-level
+table with `_G` reachable through `__index`; on standalone `luau`
+it's effectively `_G`. The launcher can write globals to it freely
+and they show up as host APIs to the user program:
 
 ```lua
-local userEnv = setmetatable({}, {__index = _G})
-userEnv._G    = userEnv
+hostInfo = {appName = "my-game", version = "1.0"}
+hostAPI  = {spawn = function(x, y) ... end}
 
--- Optional: restrict what the user program can access.
--- userEnv._G now shadows _G, so writes go to userEnv and don't leak.
-
--- If you want to give the user access to your own host APIs:
-userEnv.myGameAPI = {
-    spawnEntity = function(x, y) ... end,
-    killEntity  = function(id) ... end,
-}
+micro(inputData, getfenv())
 ```
 
-If you want a truly sandboxed environment, set the `__index` metatable
-of `userEnv` to a curated table instead of `_G`.
+For a tighter sandbox build your own table with a curated `__index`:
 
-This same env is what the macro-VM uses to look up `string.byte`,
-`table.pack`, `error`, `tostring`, etc. — as long as it falls through
-to `_G` (via `__index`), stdlib names resolve automatically.
+```lua
+local sandbox = setmetatable({
+    -- only expose the bits you want
+    print = print,
+    string = string,
+    math = math,
+}, {__index = function(_, k) return nil end})
+
+micro(inputData, sandbox)
+```
 
 ## Error handling
 
-User errors (uncaught) propagate out of `micro(...)` as normal Lua
-errors, prefixed with `<label>:<line>:` like the standard VM does.
-Wrap the call in `pcall` if you need to recover.
+User errors propagate out of `micro(...)` as normal Lua errors with
+exactly the message the user code raised (`error("boom")` produces
+`"boom"`). Wrap the call in `pcall` if you want to recover gracefully:
 
 ```lua
-local ok, err = pcall(micro, inputData, userEnv, "myscript.luau")
+local ok, err = pcall(micro, inputData)
 if not ok then
-    -- err is a string like "myscript.luau:42: attempt to call a nil value"
-    warn("script crashed:", err)
+    -- err is the user-supplied message, e.g. "boom"
+    warn("user program crashed: " .. tostring(err))
 end
+```
+
+For full stealth (no Lua stack trace from the host runtime in the
+fallthrough case), wrap with `pcall` and re-raise at level 0:
+
+```lua
+local ok, err = pcall(micro, inputData)
+if not ok then error(err, 0) end
 ```

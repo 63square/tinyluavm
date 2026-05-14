@@ -32,16 +32,13 @@ def ensure_macro_bin() -> pathlib.Path:
 
 
 # Shared bottom-half of every runner. The micro-VM resolves macro-VM
-# globals (string.byte, table.pack, etc.) through `userEnv`, which
-# falls through to `_G`.
+# globals (string.byte, table.pack, etc.) through the caller's env,
+# which here is just `getfenv()` of the runner script.
 _RUNNER_TEMPLATE = """--!nocheck
 local micro = require("./_tinyvm")
 local D     = require("./_input")
 
-local userEnv = setmetatable({}, {__index=_G})
-userEnv._G = userEnv
-
-micro(D, userEnv, %LABEL%)
+micro(D, getfenv())
 """
 
 
@@ -75,10 +72,7 @@ def run_one(luau_src: pathlib.Path) -> tuple[bool, str]:
         )
 
         runner = BUILD / "_runner_test.luau"
-        runner.write_text(
-            _RUNNER_TEMPLATE.replace("%LABEL%", repr(luau_src.name)),
-            encoding="utf-8",
-        )
+        runner.write_text(_RUNNER_TEMPLATE, encoding="utf-8")
         r2 = subprocess.run(
             ["luau", str(runner)],
             capture_output=True, text=True, timeout=180,

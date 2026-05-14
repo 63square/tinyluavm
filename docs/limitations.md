@@ -35,23 +35,22 @@ level because the macro-VM bridges it.
 
 ### The micro-VM cannot run standalone
 
-`src/tinyvm.luau` is `function(inputData, userEnv, label)` and
-requires:
+`src/tinyvm.luau` is `function(inputData, userEnv?)` and requires:
 
 * `inputData` — `{m = macroAst, u = userAst}` where each value is a
   pre-decoded `{K, F}` produced by `tools/predecode.py`. The
   micro-VM has no bytecode reader; raw `.bin` strings are not
   accepted.
-* `userEnv` — the table the user program sees as its `_G`. The
-  macro-VM also resolves its own globals (`string`, `table`,
-  `error`, ...) through the same table. A writable shadow of `_G`
-  with `__index = _G` is the typical shape.
-* `label` — the chunk name shown in diagnostic messages.
+* `userEnv` — the table the user program sees as its globals. The
+  macro-VM also resolves its own stdlib references (`string`,
+  `table`, `error`, ...) through the same table. Defaults to
+  `getfenv(2)` (the caller's environment) if omitted.
 
 If you just `require("./tinyvm")` and call it without first
 predecoding the macro-VM, nothing happens; the call site has to be
-wired up to the predecoded artifacts. See `examples/split-deploy/`
-and `examples/json-deploy/` for complete recipes.
+wired up to the predecoded artifacts. See `examples/split-deploy/`,
+`examples/json-deploy/`, and `examples/http-deploy/` for complete
+recipes.
 
 
 
@@ -87,11 +86,15 @@ Only present in Roblox Luau, not in upstream `luau` standalone. Use
 
 ### Native source-line errors
 
-When user code does `error("oops")`, the macro-VM prepends
-`chunkname:line:` as Lua does. When the *host* runtime raises an
-error (e.g., calling a `nil`), the prefix is added by our call-site
-wrapper. Both produce reasonable diagnostics. Programs that pattern-
-match exact error text against the *native* Luau VM's wording may
+User-raised errors do **not** carry a `chunkname:line:` prefix. When
+user code does `error("oops")`, the macro-VM intercepts the call and
+re-raises with level 0, so the resulting error string is exactly
+`"oops"` — no source-file or line annotation. Same for
+`assert(false, "msg")`: the error is `"msg"`, not
+`"chunk:42: msg"`.
+
+Programs that pattern-match exact error text against the *native*
+Luau VM's wording may
 behave slightly differently. The conformance tests that pass include
 the ones that check fragments like `: attempt to call`,
 `: assertion failed!`, `'for' initial value`, `attempt to iterate

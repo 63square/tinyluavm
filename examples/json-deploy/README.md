@@ -46,19 +46,17 @@ python examples/json-deploy/build_and_run.py
 Expected output:
 
 ```
-[json-deploy] predecoded macro-VM + user.luau -> payload.json (19319 bytes)
+[json-deploy] predecoded macro-VM + user.luau -> payload.json (...)
 [json-deploy] wrapped JSON payload as a Luau module
-[json-deploy] staged tinyvm.luau (2472 bytes), jsondec.luau, launcher.luau
+[json-deploy] staged tinyvm.luau (2485 bytes), jsondec.luau, launcher.luau
 [json-deploy] invoking luau on staged/launcher.luau
 ============================================================
-== launcher: running user.luau (all data plane is JSON) ==
 hello from tinyvm-json-deploy-example v1.0
 counter: 1, 2, 3
 basket total: 1.85
 v = Vec(4,6)
-pcall returned ok=false err=user.luau:34: intentional
+pcall returned ok=false err=intentional
 user.luau done
-== launcher: user program finished cleanly ==
 ============================================================
 [json-deploy] done
 ```
@@ -95,14 +93,10 @@ Lua-specific constructs.
 1. The launcher `require()`s the wrapper module and gets a single
    JSON string.
 2. It decodes the string with `jsondec.luau` (a small JSON parser).
-3. It calls the micro-VM. (The micro-VM handles BinOp/UnOp atoms
-   natively — no shadow env or op helpers needed.)
-
-   ```lua
-   micro(inputData, userEnv, "user.luau")
-   ```
-
-   `inputData` is the decoded `{m=..., u=...}` table.
+3. It calls `micro(inputData, getfenv())`. The micro-VM handles
+   BinOp/UnOp atoms natively, so no shadow env or op helpers are
+   needed. The caller's environment becomes the user program's
+   globals namespace.
 
 
 ## The user AST is also JSON

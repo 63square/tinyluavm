@@ -4,9 +4,9 @@
 plus a **build-time atom-rewriting predecoder** that does heavy lifting
 the micro-VM would otherwise have to do at runtime.
 
-1. The **micro-VM** (`src/tinyvm.luau`, 2472 bytes) is a stripped tree-
+1. The **micro-VM** (`src/tinyvm.luau`, 2485 bytes) is a stripped tree-
    walker that interprets a pre-decoded atom tree.
-2. The **macro-VM** (`src/macrovm.luau`, 5.2 KB) is a full-featured
+2. The **macro-VM** (`src/macrovm.luau`, 4.7 KB) is a full-featured
    Luau interpreter — compiled offline and pre-decoded — that the
    micro-VM *executes*.
 3. The **predecoder** (`tools/predecode.py`) rewrites the macro-VM's
@@ -24,7 +24,7 @@ A user program goes through this pipeline at run time:
                   │                                                  │
                   │   inputData = {m = macroAst, u = userAst}        │
                   │                                                  │
-                  │   micro(inputData, userEnv, label)               │
+                  │   micro(inputData, userEnv)                      │
                   │                                                  │
    src/tinyvm.luau (the micro-VM, 2.5 KB) ── interprets ── macroAst
                   │                                                  │
@@ -62,15 +62,15 @@ into a smaller equivalent set before the micro-VM ever sees them.
 The micro-VM's signature is:
 
 ```lua
-function(inputData, userEnv, label)
+function(inputData, userEnv?)
 ```
 
 | param       | what it is                                                     |
 |-------------|----------------------------------------------------------------|
 | `inputData` | `{m = macroAst, u = userAst}` where each is `{K, F}`           |
 | `userEnv`   | env table the macro-VM uses for its own globals AND what user  |
-|             | code sees as `_G`. Usually a writable shadow of `_G`.          |
-| `label`     | chunk name shown in `error()` diagnostics                      |
+|             | code sees as its globals. Defaults to `getfenv(2)` (the        |
+|             | caller's environment) if omitted.                              |
 
 `inputData` is pure data — no function literals, no userdata. Every
 nested value is a number, string, boolean, nil, or table. This means
@@ -81,10 +81,17 @@ your user code with `tools/predecode.py --for-micro --json --user
 `userEnv` is runtime wiring, not part of any serialized payload. The
 micro-VM uses it for both the macro-VM's own global lookups (`string`,
 `table`, `error`, ...) and the user program's global lookups — they
-share the same table. `__index = _G` fallthrough is the usual shape.
+share the same table. When omitted the micro-VM picks up the caller's
+environment automatically via `getfenv(2)`, so the typical idiom is
+just `micro(inputData)` or `micro(inputData, getfenv())`.
 
 `table.pack` and `table.unpack` are looked up internally by the
 micro-VM.
+
+There is no chunk-name / label argument. Errors raised by user code
+through `error("msg")` propagate out as just `"msg"` — no source
+prefix. If you need diagnostic context, attach it to the message
+yourself before raising.
 
 
 ## Where the byte savings come from
@@ -105,7 +112,7 @@ micro-VM.
 | Various local-variable hoisting and code rearranging | shared `v`, `x`, `r` locals; `M(A[n], fr)` always uses P; etc.                                                                     |  ~200  |
 | **Total approx.**                                    |                                                                                                                                    | **~2100** |
 
-(Baseline 4708 → current 2472 = 2236 actual.)
+(Baseline 4708 → current 2485 = 2223 actual.)
 
 Note: the BinOp/UnOp atom rewrite (tags 14, 15) that earlier versions
 shipped was removed when the API switched to a single-table `userEnv`
@@ -116,9 +123,11 @@ need to build a shadow env exposing op helpers.
 
 ## What the micro-VM contains
 
-In source order, the top-level function `function(inputData, userEnv,
-label)`:
+In source order, the top-level function `function(D, uE)`:
 
+* `uE = uE or getfenv(2)` — default to the caller's environment if no
+  env was passed. `micro(data)` works; `micro(data, getfenv())` is the
+  same call written explicitly.
 * `local tp, tu = table.pack, table.unpack` — `tp`/`tu` are defined
   inside the micro-VM rather than passed in.
 * `local K, F = table.unpack(D.m, 1, 2)` — extract the macro-VM AST.
@@ -142,11 +151,11 @@ label)`:
 * **`Q(ix, pa)`** — closure constructor. Reads `F[ix]`, builds the
   upvalue list `lr` from `pa` (the parent frame), and returns the
   inner closure that pushes a new frame and calls `J(Y.b, fr)`.
-* **`Q(1)()(D.u, userEnv, label)`** — entry point. The macro-VM's main
-  chunk is `F[1]`. `Q(1)` builds the main-chunk closure (no parent
-  frame); `()` invokes it (no args — the main chunk takes none);
-  `(D.u, userEnv, label)` is the user AST + env + label tuple passed
-  to the user-facing closure the main chunk returns.
+* **`Q(1)()(D.u, uE)`** — entry point. The macro-VM's main chunk is
+  `F[1]`. `Q(1)` builds the main-chunk closure (no parent frame);
+  `()` invokes it (no args — the main chunk takes none);
+  `(D.u, uE)` is the user AST + env tuple passed to the user-facing
+  closure the main chunk returns.
 
 That's the whole micro-VM.
 

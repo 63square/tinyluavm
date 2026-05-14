@@ -45,10 +45,7 @@ _RUNNER_TEMPLATE = """--!nocheck
 local micro = require("./_tinyvm")
 local D     = require("./_input")
 
-local userEnv = setmetatable({}, {__index=_G})
-userEnv._G = userEnv
-
-micro(D, userEnv, %LABEL%)
+micro(D, getfenv())
 """
 
 
@@ -76,10 +73,7 @@ def cmd_run(args):
         )
 
         runner = BUILD / "_runner.luau"
-        runner.write_text(
-            _RUNNER_TEMPLATE.replace("%LABEL%", repr(args.label)),
-            encoding="utf-8",
-        )
+        runner.write_text(_RUNNER_TEMPLATE, encoding="utf-8")
         try:
             subprocess.check_call(["luau", str(runner)])
         finally:
@@ -102,8 +96,6 @@ def main():
 
     apr = sub.add_parser("run", help="compile and run a Luau source file")
     apr.add_argument("source")
-    apr.add_argument("--label", default="user.luau",
-                     help="chunk label shown in diagnostic messages")
     apr.set_defaults(fn=cmd_run)
 
     apc = sub.add_parser("compile", help="compile a Luau source file to bytecode")
