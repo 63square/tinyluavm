@@ -194,16 +194,11 @@ def rewrite(K, F, *, for_micro=False):
     # atom set natively (Nil/True/False/BinOp/UnOp/GenericFor with __iter
     # fallback), so when we're predecoding USER code (for_micro=False) we
     # leave it alone and only convert the wire format to JSON-friendly tables.
-    nil_idx = true_idx = false_idx = None
-    binop_base = unop_base = next_name_idx = None
+    nil_idx = true_idx = false_idx = next_name_idx = None
     if for_micro:
         nil_idx       = add_const(None)
         true_idx      = add_const(True)
         false_idx     = add_const(False)
-        binop_base    = len(K) + len(new_consts) + 1
-        for i in range(1, 15): add_const(f"B{i}")
-        unop_base     = len(K) + len(new_consts) + 1
-        for i in range(1, 4):  add_const(f"U{i}")
         next_name_idx = add_const("next")
 
     def fn(atom):
@@ -214,11 +209,6 @@ def rewrite(K, F, *, for_micro=False):
         if t == 1: return [4, nil_idx]
         if t == 2: return [4, true_idx]
         if t == 3: return [4, false_idx]
-        # Rewrite BinOp/UnOp atoms as Call atoms targeting env-supplied helpers.
-        if t == 14:
-            return [10, [8, binop_base + atom[1] - 1], [atom[2], atom[3]], 1]
-        if t == 15:
-            return [10, [8, unop_base + atom[1] - 1], [atom[2]], 1]
         # GenericFor: force 3-source form and flatten the 2-slot variant.
         # Only safe in `for_micro` mode -- user code may pass `pairs(t)` which
         # is a single Call atom returning 3 values via multret expansion; we

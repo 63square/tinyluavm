@@ -4,14 +4,13 @@
 plus a **build-time atom-rewriting predecoder** that does heavy lifting
 the micro-VM would otherwise have to do at runtime.
 
-1. The **micro-VM** (`src/tinyvm.luau`, 1997 bytes) is a stripped tree-
+1. The **micro-VM** (`src/tinyvm.luau`, 2472 bytes) is a stripped tree-
    walker that interprets a pre-decoded atom tree.
 2. The **macro-VM** (`src/macrovm.luau`, 5.2 KB) is a full-featured
    Luau interpreter — compiled offline and pre-decoded — that the
    micro-VM *executes*.
 3. The **predecoder** (`tools/predecode.py`) rewrites the macro-VM's
-   atom tree at build time: folding constants, replacing arithmetic
-   opcodes with calls to env-supplied helpers, unifying opcodes, and
+   atom tree at build time: folding constants, unifying opcodes, and
    converting function records to a JSON-friendly shape. The same tool
    also predecodes user programs into the same data shape.
 
@@ -25,9 +24,9 @@ A user program goes through this pipeline at run time:
                   │                                                  │
                   │   inputData = {m = macroAst, u = userAst}        │
                   │                                                  │
-                  │   micro(env, inputData, userEnv, label)          │
+                  │   micro(inputData, userEnv, label)               │
                   │                                                  │
-   src/tinyvm.luau (the micro-VM, 2 KB) ── interprets ── macroAst
+   src/tinyvm.luau (the micro-VM, 2.5 KB) ── interprets ── macroAst
                   │                                                  │
                   │   macro-VM ── interprets ── userAst              │
                   │                                                  │
@@ -63,15 +62,14 @@ into a smaller equivalent set before the micro-VM ever sees them.
 The micro-VM's signature is:
 
 ```lua
-function(env, inputData, userEnv, label)
+function(inputData, userEnv, label)
 ```
 
 | param       | what it is                                                     |
 |-------------|----------------------------------------------------------------|
-| `env`       | env table the macro-VM uses for its own globals (must include  |
-|             | the op helpers `B1`..`B14` / `U1`..`U3`)                       |
 | `inputData` | `{m = macroAst, u = userAst}` where each is `{K, F}`           |
-| `userEnv`   | what user code sees as its `_G` (a normal table)               |
+| `userEnv`   | env table the macro-VM uses for its own globals AND what user  |
+|             | code sees as `_G`. Usually a writable shadow of `_G`.          |
 | `label`     | chunk name shown in `error()` diagnostics                      |
 
 `inputData` is pure data — no function literals, no userdata. Every
@@ -80,10 +78,13 @@ the whole payload is JSON-encodable; pre-decode both the macro-VM and
 your user code with `tools/predecode.py --for-micro --json --user
 <user.bin>` and load the JSON at runtime with any JSON parser.
 
-`env` and `userEnv` are runtime wiring (the env exposes op-helper
-functions; the user env is the user-code globals namespace), not part
-of any serialized payload. `table.pack` and `table.unpack` are looked
-up internally inside the micro-VM.
+`userEnv` is runtime wiring, not part of any serialized payload. The
+micro-VM uses it for both the macro-VM's own global lookups (`string`,
+`table`, `error`, ...) and the user program's global lookups — they
+share the same table. `__index = _G` fallthrough is the usual shape.
+
+`table.pack` and `table.unpack` are looked up internally by the
+micro-VM.
 
 
 ## Where the byte savings come from
@@ -92,29 +93,34 @@ up internally inside the micro-VM.
 |------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|--------|
 | Bytecode reader                                      | predecode emits Lua tables directly                                                                                                | ~1450  |
 | Nil/True/False atoms (tags 1, 2, 3)                  | folded into Const atoms (tag 4)                                                                                                    |   ~85  |
-| BinOp/UnOp atoms (tags 14, 15)                       | rewritten into Call atoms targeting `B1`..`B14` and `U1`..`U3` in the env                                                          |  ~620  |
 | Vararg expression atom (tag 5) in `z`                | macro-VM only uses Vararg in tail-call position; `P` handles it                                                                    |   ~28  |
 | Local + Upval atoms (tags 6, 7)                      | unified into tag 6 with `"S"`/`"U"` storage marker; single handler                                                                 |   ~22  |
 | Generic-for `__iter` fallback in micro-VM            | force_gfor3 rewrites `for k,v in t do` into `for k,v in next, t, nil do`                                                           |   ~52  |
-| NumericFor step support                              | dropped -- verified macro-VM never emits step                                                                                      |   ~80  |
+| NumericFor step support                              | dropped — verified macro-VM never emits step                                                                                       |   ~80  |
 | Multi-target Assign for non-Local kinds              | rewrites single-target Assign by kind (Local/Upval → t==20, Global → t==22, Index → t==23); multi-target only sees Local           |  ~120  |
 | `if`/`elseif`/`else` IIFE in t==32                   | flattened to a single (cond, block) pair list                                                                                      |   ~40  |
 | Generic-for 2-slot flatten                           | inlines the slot pair directly in the atom                                                                                         |   ~12  |
 | Top-level return value (caller-side void)            | dropped: `Q(1)()(...)` instead of `return Q(1)()...`                                                                               |    ~7  |
 | `M` doubles as the break sentinel                    | no separate `local H = {}` allocation                                                                                              |    ~8  |
 | Various local-variable hoisting and code rearranging | shared `v`, `x`, `r` locals; `M(A[n], fr)` always uses P; etc.                                                                     |  ~200  |
-| **Total approx.**                                    |                                                                                                                                    | **~2725** |
+| **Total approx.**                                    |                                                                                                                                    | **~2100** |
 
-(Baseline 4708 → current 1997 = 2711 actual.)
+(Baseline 4708 → current 2472 = 2236 actual.)
+
+Note: the BinOp/UnOp atom rewrite (tags 14, 15) that earlier versions
+shipped was removed when the API switched to a single-table `userEnv`
+argument. The micro-VM now handles those atoms natively, costing ~530
+bytes vs the rewrite approach. The trade is a simpler caller API: no
+need to build a shadow env exposing op helpers.
 
 
 ## What the micro-VM contains
 
-In source order, the top-level function `function(env, inputData,
-userEnv, label)`:
+In source order, the top-level function `function(inputData, userEnv,
+label)`:
 
-* `local tp, tu = table.pack, table.unpack` — packed/unpack are
-  defined inside the micro-VM rather than passed in.
+* `local tp, tu = table.pack, table.unpack` — `tp`/`tu` are defined
+  inside the micro-VM rather than passed in.
 * `local K, F = table.unpack(D.m, 1, 2)` — extract the macro-VM AST.
 * `local z, P, J, Q` — forward declarations for the four mutually
   recursive functions.
@@ -124,8 +130,9 @@ userEnv, label)`:
   multi-target Assign, multi-source LocalDecl, GenericFor sources, and
   Return.
 * **`z(n, fr)`** — single-value expression evaluator. Handles tags
-  4, 6, 8, 9, 10, 12, 13, 16, 17. `local t, k, m = n[1], n[2], n[3]`
-  at the start aliases the three most commonly used atom positions.
+  4, 6, 8, 9, 10, 12, 13, 14, 15, 16, 17. `local t, k, m = n[1], n[2],
+  n[3]` at the start aliases the three most commonly used atom
+  positions.
 * **`P(n, fr)`** — call/multret evaluator. Returns a pack table
   (`{n=N, [1]=..., [2]=..., ...}`). Handles tags 10 (Call) and 5
   (Vararg); everything else falls through to `tp(z(n,fr))`.
@@ -137,7 +144,7 @@ userEnv, label)`:
   inner closure that pushes a new frame and calls `J(Y.b, fr)`.
 * **`Q(1)()(D.u, userEnv, label)`** — entry point. The macro-VM's main
   chunk is `F[1]`. `Q(1)` builds the main-chunk closure (no parent
-  frame); `()` invokes it (no args -- the main chunk takes none);
+  frame); `()` invokes it (no args — the main chunk takes none);
   `(D.u, userEnv, label)` is the user AST + env + label tuple passed
   to the user-facing closure the main chunk returns.
 
@@ -167,24 +174,20 @@ native atom set.
 
 1. **Fold Nil/True/False**: `[1]` (Nil), `[2]` (True), `[3]` (False)
    become `[4, idx]` where `K[idx]` holds the corresponding value.
-2. **BinOp/UnOp to Call**: `[14, opCode, a, b]` (BinOp) becomes
-   `[10, [8, B_idx], [a, b], 1]` (a Call atom calling the global
-   `B<opCode>` with two args, multret-1). Similarly for `[15]` (UnOp).
-   Adds 17 string constants to K: `"B1"`..`"B14"`, `"U1"`..`"U3"`.
-3. **Local/Upval unify**: `[6, slot]` (Local) becomes `[6, "S", slot]`;
+2. **Local/Upval unify**: `[6, slot]` (Local) becomes `[6, "S", slot]`;
    `[7, slot]` (Upval) becomes `[6, "U", slot]`. The micro-VM's `z`
    handler dispatches via `fr[k][m][1]` (a single lookup regardless
    of storage kind).
-4. **GenericFor 3-source + 2-slot flatten**: `[36, slots, [src], body]`
+3. **GenericFor 3-source + 2-slot flatten**: `[36, slots, [src], body]`
    (1-source GenericFor) becomes `[36, slots, [Global("next"), src,
    Const(nil)], body]`. All 2-slot variants are flattened to
    `[36, s1, s2, sources, body]`.
-5. **NumericFor step drop**: `[35, slot, from, to, None, body]` becomes
+4. **NumericFor step drop**: `[35, slot, from, to, None, body]` becomes
    `[35, slot, from, to, body]` (no step slot).
-6. **If flatten**: `[32, c0, t0, elseifs, else]` becomes
+5. **If flatten**: `[32, c0, t0, elseifs, else]` becomes
    `[32, [[c0, t0]] ++ elseifs, else]`. The main cond becomes the first
    `(cond, block)` pair in a uniform list.
-7. **Single-target Assign split**: Single-target `[30, [target], [value]]`
+6. **Single-target Assign split**: Single-target `[30, [target], [value]]`
    becomes one of:
    * `[20, "S", slot, value]` — local assign
    * `[20, "U", slot, value]` — upvalue assign
@@ -194,6 +197,11 @@ native atom set.
    Multi-target `[30, [targets...], [values...]]` is only kept when
    all targets are local; the targets list is flattened to slot
    integers.
+
+BinOp/UnOp atoms (tags 14, 15) are deliberately **not** rewritten;
+the micro-VM handles them natively. Keeping the BinOp/UnOp handlers in
+the micro-VM means the caller's `userEnv` doesn't need to expose any
+helper functions — it's just a plain table.
 
 ### Function record shape
 
@@ -276,7 +284,11 @@ values upward via `return x`.
   data, so neither needs a reader.
 * **`tp` / `tu` are internal.** The micro-VM aliases them from the
   stdlib at startup with `local tp, tu = table.pack, table.unpack`.
-* **`inputData` carries everything.** The single `inputData` table the
-  caller passes contains both the macro-VM AST (`D.m`) and the user
-  program AST (`D.u`). The micro-VM extracts macro K/F at startup and
-  forwards user AST to the macro-VM main closure.
+* **`inputData` carries everything data-side.** The single `inputData`
+  table the caller passes contains both the macro-VM AST (`D.m`) and
+  the user program AST (`D.u`). The micro-VM extracts macro K/F at
+  startup and forwards user AST to the macro-VM main closure.
+* **`userEnv` is a plain table.** The caller passes one ordinary
+  table. No shadow-env construction, no op-helper wiring. The
+  macro-VM's own globals (string, table, error, ...) resolve through
+  the same `userEnv` via `__index = _G`.

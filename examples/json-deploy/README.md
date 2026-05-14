@@ -48,7 +48,7 @@ Expected output:
 ```
 [json-deploy] predecoded macro-VM + user.luau -> payload.json (19319 bytes)
 [json-deploy] wrapped JSON payload as a Luau module
-[json-deploy] staged tinyvm.luau (1997 bytes), jsondec.luau, launcher.luau
+[json-deploy] staged tinyvm.luau (2472 bytes), jsondec.luau, launcher.luau
 [json-deploy] invoking luau on staged/launcher.luau
 ============================================================
 == launcher: running user.luau (all data plane is JSON) ==
@@ -95,13 +95,11 @@ Lua-specific constructs.
 1. The launcher `require()`s the wrapper module and gets a single
    JSON string.
 2. It decodes the string with `jsondec.luau` (a small JSON parser).
-3. It builds the shadow env exposing the op-helper functions
-   (`B1`..`B14`, `U1`..`U3`) the predecoder rewrote macro-VM
-   BinOp/UnOp atoms into.
-4. It calls the micro-VM:
+3. It calls the micro-VM. (The micro-VM handles BinOp/UnOp atoms
+   natively — no shadow env or op helpers needed.)
 
    ```lua
-   micro(shadowEnv, inputData, userEnv, "user.luau")
+   micro(inputData, userEnv, "user.luau")
    ```
 
    `inputData` is the decoded `{m=..., u=...}` table.

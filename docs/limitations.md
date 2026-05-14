@@ -35,18 +35,17 @@ level because the macro-VM bridges it.
 
 ### The micro-VM cannot run standalone
 
-`src/tinyvm.luau` is `function(env, inputData, userEnv, label)` and
+`src/tinyvm.luau` is `function(inputData, userEnv, label)` and
 requires:
 
-* `env` — an env that exposes the macro-VM's globals (`string`,
-  `table`, `error`, `setmetatable`, ...) **plus** the op helpers
-  `B1`..`B14` and `U1`..`U3` (functions implementing the binary and
-  unary operators the predecoder rewrote BinOp/UnOp atoms into).
 * `inputData` — `{m = macroAst, u = userAst}` where each value is a
   pre-decoded `{K, F}` produced by `tools/predecode.py`. The
   micro-VM has no bytecode reader; raw `.bin` strings are not
   accepted.
-* `userEnv` — the table the user program sees as its `_G`.
+* `userEnv` — the table the user program sees as its `_G`. The
+  macro-VM also resolves its own globals (`string`, `table`,
+  `error`, ...) through the same table. A writable shadow of `_G`
+  with `__index = _G` is the typical shape.
 * `label` — the chunk name shown in diagnostic messages.
 
 If you just `require("./tinyvm")` and call it without first
@@ -54,25 +53,6 @@ predecoding the macro-VM, nothing happens; the call site has to be
 wired up to the predecoded artifacts. See `examples/split-deploy/`
 and `examples/json-deploy/` for complete recipes.
 
-### The op-helper env
-
-The predecoder rewrites every BinOp/UnOp atom in the macro-VM into a
-Call atom that looks up `B1`..`B14` / `U1`..`U3` in the env. If your
-env doesn't expose them, the macro-VM will fail to run (you'll see
-errors like `attempt to call a nil value` while it's setting up
-constants). Build a shadow env on top of your user env:
-
-```lua
-local shadowEnv = setmetatable({
-  B1 = function(a, b) return a + b end,
-  B2 = function(a, b) return a - b end,
-  -- ...
-  B14 = function(a, b) return a >= b end,
-  U1 = function(a) return -a end,
-  U2 = function(a) return not a end,
-  U3 = function(a) return #a end,
-}, {__index = your_user_env})
-```
 
 
 ## Things that **don't** work

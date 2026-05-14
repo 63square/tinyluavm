@@ -48,19 +48,7 @@ local D     = require("./_input")
 local userEnv = setmetatable({}, {__index=_G})
 userEnv._G = userEnv
 
-local shadowEnv = setmetatable({
-  B1=function(a,b) return a+b end, B2=function(a,b) return a-b end,
-  B3=function(a,b) return a*b end, B4=function(a,b) return a/b end,
-  B5=function(a,b) return a//b end, B6=function(a,b) return a%b end,
-  B7=function(a,b) return a^b end, B8=function(a,b) return a..b end,
-  B9=function(a,b) return a==b end, B10=function(a,b) return a~=b end,
-  B11=function(a,b) return a<b end, B12=function(a,b) return a<=b end,
-  B13=function(a,b) return a>b end, B14=function(a,b) return a>=b end,
-  U1=function(a) return -a end, U2=function(a) return not a end,
-  U3=function(a) return #a end,
-}, {__index = userEnv})
-
-micro(shadowEnv, D, userEnv, %LABEL%)
+micro(D, userEnv, %LABEL%)
 """
 
 

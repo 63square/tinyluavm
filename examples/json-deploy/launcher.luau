@@ -21,7 +21,9 @@ local decode   = require("./jsondec")
 local inputData = decode(require("./payload-json")[1])
 
 -- The env the user program sees as `_G`. A writable shadow of `_G` is
--- usually fine; restrict or extend as needed.
+-- usually fine; restrict or extend as needed. The micro-VM handles
+-- BinOp/UnOp natively, so no shadow env is needed -- the macro-VM
+-- resolves its own globals through this same table.
 local userEnv = setmetatable({}, {__index = _G})
 userEnv._G = userEnv
 userEnv.hostInfo = {
@@ -29,36 +31,12 @@ userEnv.hostInfo = {
     appVersion = "1.0",
 }
 
--- The shadow env exposes the op-helper functions the predecoder rewrote
--- BinOp/UnOp atoms into. The fallthrough chain is:
---   shadowEnv -> userEnv -> _G
-local shadowEnv = setmetatable({
-    B1  = function(a, b) return a + b  end,
-    B2  = function(a, b) return a - b  end,
-    B3  = function(a, b) return a * b  end,
-    B4  = function(a, b) return a / b  end,
-    B5  = function(a, b) return a // b end,
-    B6  = function(a, b) return a %  b end,
-    B7  = function(a, b) return a ^  b end,
-    B8  = function(a, b) return a .. b end,
-    B9  = function(a, b) return a == b end,
-    B10 = function(a, b) return a ~= b end,
-    B11 = function(a, b) return a <  b end,
-    B12 = function(a, b) return a <= b end,
-    B13 = function(a, b) return a >  b end,
-    B14 = function(a, b) return a >= b end,
-    U1  = function(a) return -a end,
-    U2  = function(a) return not a end,
-    U3  = function(a) return #a end,
-}, {__index = userEnv})
-
--- micro(env, inputData, userEnv, label)
---   env       - the env the macro-VM uses for its own globals + helpers
+-- micro(inputData, userEnv, label)
 --   inputData - {m = macro-VM AST, u = user-program AST}
 --   userEnv   - what user code sees as its _G
 --   label     - chunk name shown in diagnostic messages
 print("== launcher: running user.luau (all data plane is JSON) ==")
-local ok, err = pcall(micro, shadowEnv, inputData, userEnv, "user.luau")
+local ok, err = pcall(micro, inputData, userEnv, "user.luau")
 if not ok then
     print("== launcher: user program raised an error ==")
     print(tostring(err))

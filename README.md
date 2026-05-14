@@ -1,9 +1,9 @@
 # tinyvm
 
-**A Luau interpreter for Luau, in 1997 bytes of Luau source.**
+**A Luau interpreter for Luau, in 2472 bytes of Luau source.**
 
 `tinyvm` is a two-stage Luau-in-Luau interpreter. The thing that lives in
-your project is a 2 KB micro-VM (`src/tinyvm.luau`). It expects a
+your project is a 2.5 KB micro-VM (`src/tinyvm.luau`). It expects a
 caller-supplied "macro-VM" — the full feature-complete interpreter,
 pre-decoded at build time into pure-data `(K, F)` tables — and runs
 your user code through it.
@@ -15,7 +15,7 @@ trip losslessly through JSON.
 
 ```
    ┌──────────────────────────────────────────────────────────────────┐
-   │ src/tinyvm.luau   (1997 bytes — this is what ships)              │
+   │ src/tinyvm.luau   (2472 bytes — this is what ships)              │
    │   interprets → macro-VM AST  (pre-decoded from src/macrovm.luau) │
    │                  interprets → user AST (pre-decoded from .luau)  │
    └──────────────────────────────────────────────────────────────────┘
@@ -24,7 +24,7 @@ trip losslessly through JSON.
 The trick: both the macro-VM AST and the user-program AST are *data*
 that the caller supplies — they don't count against the size of the
 shipped `tinyvm.luau`. The micro-VM only has to handle the small subset
-of Luau features the macro-VM itself uses, and all of those are further
+of Luau features the macro-VM itself uses, and most of those are further
 reduced by build-time atom rewrites that fold opcodes the micro-VM
 would otherwise need to dispatch.
 
@@ -46,12 +46,15 @@ would otherwise need to dispatch.
 * **JSON-encodable input plane**. The macro-VM AST and the user program
   AST combine into a single `inputData` payload — pure data, JSON
   serializable, diffable, hashable, transformable with `jq`.
+* **Simple 3-argument API**. The caller passes the combined `inputData`,
+  a plain user env, and a chunk label. No shadow env construction, no
+  op-helper wiring.
 
 
 ## Layout
 
     src/
-      tinyvm.luau          micro-VM — the 1997-byte interpreter
+      tinyvm.luau          micro-VM — the 2472-byte interpreter
       macrovm.luau         macro-VM source (Luau) — readable reference;
                            compiled and pre-decoded at build time
     tools/
@@ -78,19 +81,19 @@ would otherwise need to dispatch.
 The micro-VM is a single function:
 
 ```lua
-micro(env, inputData, userEnv, label)
+micro(inputData, userEnv, label)
 ```
 
 | argument    | what it is                                                       |
 |-------------|------------------------------------------------------------------|
-| `env`       | env the macro-VM uses for its own globals; must include the op   |
-|             | helpers `B1`..`B14` (binary ops) and `U1`..`U3` (unary ops)      |
 | `inputData` | `{m = macroAst, u = userAst}` where each is `{K, F}`             |
-| `userEnv`   | what user code sees as its `_G` (a normal table)                 |
+| `userEnv`   | what user code sees as its `_G`; usually a writable shadow of    |
+|             | `_G`. The macro-VM resolves its own globals (`string`, `table`,  |
+|             | `error`, ...) through the same table.                            |
 | `label`     | chunk name shown in `error()` diagnostics                        |
 
-`table.pack` and `table.unpack` are looked up internally by the
-micro-VM; you don't pass them in.
+`table.pack`, `table.unpack`, and the arithmetic-op handlers are
+implemented inside the micro-VM; you don't pass them in.
 
 
 ## Quickstart
@@ -133,13 +136,7 @@ local userAst = require("./user-ast")     -- returns {K, F}
 local userEnv = setmetatable({}, {__index = _G})
 userEnv._G = userEnv
 
--- Shadow env exposing the op helpers; falls through to userEnv -> _G.
-local shadowEnv = setmetatable({
-    B1  = function(a, b) return a + b  end,   -- ...
-    -- ... 13 more binops and 3 unops; see examples for the full list.
-}, {__index = userEnv})
-
-micro(shadowEnv, {m = mvmAst, u = userAst}, userEnv, "user.luau")
+micro({m = mvmAst, u = userAst}, userEnv, "user.luau")
 ```
 
 ### All-JSON deploy (one document)
@@ -161,26 +158,29 @@ local micro     = require("./tinyvm")
 local decode    = require("./jsondec")
 local inputData = decode(loadPayloadJsonSomehow())
 
--- ... build shadowEnv and userEnv as above ...
-micro(shadowEnv, inputData, userEnv, "myscript.luau")
+local userEnv = setmetatable({}, {__index = _G})
+userEnv._G = userEnv
+
+micro(inputData, userEnv, "myscript.luau")
 ```
 
 
 ## How small is it really?
 
 ```
-src/tinyvm.luau          1997 bytes  ← the deliverable
+src/tinyvm.luau          2472 bytes  ← the deliverable
 src/macrovm.luau         5221 bytes  ← reference; gets compiled away
 build/macrovm.bin        4384 bytes  ← compact bytecode form of macrovm.luau
-build/macrovm-ast.luau  ~17100 bytes ← pre-decoded as Lua source (or JSON)
+build/macrovm-ast.luau  ~15700 bytes ← pre-decoded as Lua source (or JSON)
 ```
 
-The 1997-byte figure covers the entire tree-walker: expression
-evaluation, multi-return / multi-assign, table construction, closure
-binding (via `Q`, which builds upvalues from pure-data records), all
-five flavors of loop, `if`/`elseif`/`else`, `return`/`break`, and
-global/local/upvalue/index assignment. Removing any of these breaks
-the macro-VM that runs on top of it.
+The 2472-byte figure covers the entire tree-walker: expression
+evaluation, all 14 binary operators, all 3 unary operators, multi-
+return / multi-assign, table construction, closure binding (via `Q`,
+which builds upvalues from pure-data records), all five flavors of
+loop, `if`/`elseif`/`else`, `return`/`break`, and global/local/upvalue/
+index assignment. Removing any of these breaks the macro-VM that runs
+on top of it.
 
 
 ## Constraints
@@ -190,11 +190,6 @@ the macro-VM that runs on top of it.
 * **Build-time pre-decoding is required for everything.** Both the
   macro-VM AST and the user program AST are pure-data tables produced
   by `tools/predecode.py`. There is no runtime bytecode reader.
-* **The op-helper env is required.** The predecoder rewrites every
-  macro-VM BinOp/UnOp atom into a Call atom that looks up `B1`..`B14`
-  / `U1`..`U3` in the env. Your env must expose them. Both example
-  launchers do this with a shadow env that falls through to the user
-  env.
 * **The macro-VM is a specific Luau program.** As shipped, the micro-VM
   is matched to the atom set `src/macrovm.luau` emits after the
   predecoder runs. If you want to swap in a completely different

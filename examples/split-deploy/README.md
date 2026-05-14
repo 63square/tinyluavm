@@ -3,7 +3,7 @@
 A complete, runnable example of shipping tinyvm as three separate Luau
 modules:
 
-1. `tinyvm.luau` — the 1997-byte micro-VM.
+1. `tinyvm.luau` — the 2472-byte micro-VM.
 2. `macrovm-ast.luau` — the pre-decoded macro-VM AST (`return {K, F}`).
 3. `user-ast.luau` — the pre-decoded user program (`return {K, F}`).
 
@@ -56,8 +56,8 @@ it.
 Expected output:
 
 ```
-[split-deploy] staged tinyvm.luau (1997 bytes)
-[split-deploy] staged macrovm-ast.luau (17065 bytes)
+[split-deploy] staged tinyvm.luau (2472 bytes)
+[split-deploy] staged macrovm-ast.luau (15742 bytes)
 [split-deploy] compiled user.luau (1489 bytes of bytecode)
 [split-deploy] predecoded user.luau -> user-ast.luau (3916 bytes)
 [split-deploy] staged launcher.luau
@@ -88,18 +88,15 @@ user.luau done
 This is what you'd actually write in a real project. It:
 
 1. `require()`s the three Luau modules:
-   * `./tinyvm`      — the 1997-byte micro-VM, a function value.
+   * `./tinyvm`      — the 2472-byte micro-VM, a function value.
    * `./macrovm-ast` — a `{K, F}` table for the macro-VM.
    * `./user-ast`    — a `{K, F}` table for the user program.
 2. Combines the two ASTs into `inputData = {m = mvmAst, u = userAst}`.
-3. Builds a **shadow env** that wraps the user env, exposing the
-   `B1`..`B14` (binary op) and `U1`..`U3` (unary op) helper functions
-   the predecoder rewrote BinOp/UnOp atoms into. `__index` falls
-   through to the user env, which in turn falls through to `_G`.
-4. Calls the micro-VM:
+3. Calls the micro-VM. (The micro-VM handles BinOp/UnOp atoms
+   natively, so no shadow env exposing op helpers is needed.)
 
    ```lua
-   micro(shadowEnv, inputData, userEnv, "user.luau")
+   micro(inputData, userEnv, "user.luau")
    ```
 
 The call is wrapped in `pcall` so an uncaught user error prints

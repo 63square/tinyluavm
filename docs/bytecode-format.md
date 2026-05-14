@@ -199,20 +199,6 @@ The atoms `[1]` (Nil), `[2]` (True), `[3]` (False) become `[4, idx]`
 where `K[idx]` holds `nil` / `true` / `false`. The predecoder appends
 those three values to K.
 
-#### BinOp/UnOp → Call
-
-Each `[14, opCode, a, b]` becomes `[10, [8, B_idx], [a, b], 1]`,
-a Call atom whose function is the global `B<opCode>` (one of
-`B1`..`B14`) applied to `(a, b)` with multret 1. Similarly
-`[15, opCode, a]` becomes a Call of `U<opCode>` (`U1`..`U3`) on `(a)`.
-
-The predecoder appends 17 string constants to K: `"B1"`..`"B14"`,
-`"U1"`..`"U3"`. The caller-provided env must expose those names as
-functions; both example launchers
-([split-deploy](../examples/split-deploy/launcher.luau) and
-[json-deploy](../examples/json-deploy/launcher.luau)) build a shadow
-env that does this and falls through to the user env via `__index`.
-
 #### Local/Upval unify
 
 Local atoms `[6, slot]` become `[6, "S", slot]`; Upval atoms
@@ -325,7 +311,7 @@ The macro-VM half always carries the micro-VM-specific rewrites
 (implied by `--for-micro` applying to the first input). The user half
 never carries them — the macro-VM consumes it at runtime, so its atoms
 stay in the form the macro-VM source recognizes (raw int upvalue
-kinds, unflattened If/NumericFor/GenericFor, native BinOp/UnOp atoms).
+kinds, unflattened If/NumericFor/GenericFor).
 
 When `--user` is omitted, output is just the macro-VM's `[K, F]` (or
 `{K, F}` in Luau form). When `--for-micro` is omitted entirely (with
@@ -343,11 +329,13 @@ After all rewrites, the micro-VM dispatches on this reduced atom set:
 |-----|------------------------------------------|----------------------------------------|
 | 4   | Const                                    | `return K[k]`                          |
 | 6   | Local *or* Upval (with storage marker)   | `return fr[k][m][1]`                   |
-| 8   | Global                                   | `return E[K[k]]`                       |
+| 8   | Global                                   | `return uE[K[k]]`                      |
 | 9   | Index                                    | `return z(k, fr)[z(m, fr)]`            |
 | 10  | Call (single-value context)              | `return P(n, fr)[1]`                   |
 | 12  | Closure                                  | `return Q(k, fr)`                      |
 | 13  | Table constructor                        | array via `M`, then hash entries       |
+| 14  | BinOp                                    | 14-way `if/elseif` chain               |
+| 15  | UnOp                                     | 3-way `if/elseif` chain                |
 | 16  | And                                      | `return z(k,fr) and z(m,fr)`           |
 | 17  | Or                                       | `return z(k,fr) or z(m,fr)`            |
 
@@ -364,7 +352,7 @@ After all rewrites, the micro-VM dispatches on this reduced atom set:
 | tag | meaning                          | notes                                                |
 |-----|----------------------------------|------------------------------------------------------|
 | 20  | Local/Upval Assign               | `fr[p][h][1] = z(u, fr)` — `p` is `"S"` or `"U"`     |
-| 22  | Global Assign                    | `E[K[p]] = z(h, fr)`                                 |
+| 22  | Global Assign                    | `uE[K[p]] = z(h, fr)`                          |
 | 23  | Index Assign                     | `z(p, fr)[z(h, fr)] = z(u, fr)`                      |
 | 30  | Multi-target Local Assign        | iterate slot ints, `fr.S[s][1] = v[j]`               |
 | 31  | LocalDecl                        | iterate slot ints, `fr.S[s] = {v[j]}` (fresh box)    |
