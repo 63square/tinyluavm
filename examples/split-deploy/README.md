@@ -147,5 +147,7 @@ the four files as a separate `ModuleScript`.
 * **More user programs.** Drop another `.luau` file in this folder
   and tweak `build_and_run.py` to compile and predecode that one too.
 
-See the sibling [`json-deploy/`](../json-deploy/) for the same idea
-but with a single combined JSON document as the wire format.
+See the siblings [`json-deploy/`](../json-deploy/) (same idea but
+with a single combined JSON document as the wire format) and
+[`http-deploy/`](../http-deploy/) (same JSON payload, fetched over
+HTTP at runtime).

@@ -147,23 +147,26 @@ See `docs/bytecode-format.md` for the full atom-tag reference.
 
 ## Where this fits in the deployment matrix
 
-|                                  | split deploy                          | json deploy (this)                    |
-|----------------------------------|---------------------------------------|---------------------------------------|
-| User-source code that ships      | one file (`tinyvm.luau`, 2472 bytes)  | one file (`tinyvm.luau`, 2472 bytes)  |
-| Macro-VM data format             | Luau module returning `{K, F}`        | JSON string (combined with user)      |
-| User program data format         | Luau module returning `{K, F}`        | JSON string (combined with macro-VM)  |
-| Launcher boilerplate             | ~25 lines                             | ~25 lines + a JSON parser             |
-| Source code can be diffed/jq'd?  | partially (Lua syntax)                | yes -- everything                     |
+|                                  | split deploy             | json deploy (this)               | http deploy                     |
+|----------------------------------|--------------------------|----------------------------------|---------------------------------|
+| Macro-VM data lives in           | ModuleScript             | ModuleScript                     | HTTP endpoint                   |
+| User program lives in            | ModuleScript             | ModuleScript                     | HTTP endpoint                   |
+| Wire format                      | Luau syntax              | JSON                             | JSON                            |
+| Update flow                      | re-publish Roblox        | re-publish Roblox                | push to server, no redeploy     |
+| Network dependency               | none                     | none                             | yes (HttpService)               |
+| Launcher boilerplate             | ~25 lines                | ~25 lines + a JSON parser        | ~25 lines + JSON parser + httpGet |
+| Source code can be diffed/jq'd?  | partially                | yes -- everything                | yes -- everything               |
 
 If you want JSON-style transport for all the data tinyvm consumes,
-this example is the recipe. Otherwise the split deploy is more
+this example is the recipe. Use [http-deploy](../http-deploy/) if you
+also want runtime fetching. Otherwise the split deploy is more
 compact (no JSON parser).
 
 
 ## Customizing
 
-* **Streaming**: replace the `require("./payload-json")` call with an
-  HTTP/GetAsync call to load the JSON string from a remote service.
+* **Streaming**: see [http-deploy](../http-deploy/) for the same JSON
+  payload served and fetched over HTTP at runtime.
 * **Restricting the user env**: replace the `__index = _G` chain with
   a curated table to sandbox.
 * **Replacing the JSON parser**: any JSON parser that produces nested

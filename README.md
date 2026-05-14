@@ -74,6 +74,8 @@ would otherwise need to dispatch.
                            macro-VM AST, user-program AST
       json-deploy/         all-JSON: single combined JSON document
                            covering everything
+      http-deploy/         JSON payload served over HTTP, fetched at
+                           runtime, decoded, and executed
 
 
 ## API
@@ -118,8 +120,9 @@ python tools/test.py
 
 ## Using it in your own Luau code
 
-There are two deployment recipes shipped as runnable examples; both
-have the same shape and only differ in how the data is transported.
+Three deployment recipes are shipped as runnable examples; they all
+have the same shape (build → predecode → run) and only differ in how
+the data is transported.
 
 ### Split deploy (separate modules)
 
@@ -157,6 +160,28 @@ python tools/predecode.py build/macrovm.bin payload.json \
 local micro     = require("./tinyvm")
 local decode    = require("./jsondec")
 local inputData = decode(loadPayloadJsonSomehow())
+
+local userEnv = setmetatable({}, {__index = _G})
+userEnv._G = userEnv
+
+micro(inputData, userEnv, "myscript.luau")
+```
+
+### HTTP deploy (payload fetched at runtime)
+
+Same JSON payload as Option 2, but served by an HTTP endpoint and
+fetched by the launcher at runtime via `HttpService:GetAsync`. Lets
+you push script updates server-side without redeploying the Roblox
+place. Code lives in [`examples/http-deploy/`](examples/http-deploy/),
+including a real Python HTTP server for local testing.
+
+```lua
+local HttpService = game:GetService("HttpService")
+local micro       = require(script.tinyvm)
+local decode      = require(script.jsondec)
+
+local body      = HttpService:GetAsync("https://your-server/payload.json")
+local inputData = decode(body)
 
 local userEnv = setmetatable({}, {__index = _G})
 userEnv._G = userEnv

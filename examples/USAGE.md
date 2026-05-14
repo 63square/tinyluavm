@@ -86,6 +86,35 @@ micro(inputData, userEnv, "myscript.luau")
 See [`json-deploy/`](json-deploy/) for a complete runnable example
 including a tiny JSON parser.
 
+## 4. HTTP deploy (payload fetched at runtime)
+
+Same combined-JSON payload as Option 3, but served by an HTTP
+endpoint and fetched at runtime by the launcher. Useful for hot-swap
+deployment: push a new payload to the server, no Roblox-place re-
+publish needed.
+
+The launcher is essentially the JSON deploy launcher with the
+"load payload" step replaced by an HTTP fetch:
+
+```lua
+local HttpService = game:GetService("HttpService")
+local micro       = require(script.tinyvm)
+local decode      = require(script.jsondec)
+
+local body      = HttpService:GetAsync("https://your-server/payload.json")
+local inputData = decode(body)
+
+local userEnv = setmetatable({}, {__index = _G})
+userEnv._G    = userEnv
+
+micro(inputData, userEnv, "myscript.luau")
+```
+
+See [`http-deploy/`](http-deploy/) for a complete runnable example
+that ships a tiny Python HTTP server, plus an HTTP-GET shim that
+lets the example run under sandboxed standalone `luau` (which has
+no network stack) without changing the launcher's code.
+
 ## Compiling user programs
 
 The compiler is a pure Python script with no dependencies beyond the
