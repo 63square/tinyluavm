@@ -58,9 +58,8 @@ def run_one(luau_src: pathlib.Path) -> tuple[bool, str]:
         if m:
             npass, nfail = int(m.group(1)), int(m.group(2))
             return (nfail == 0), f"{npass}/{npass+nfail} passed"
-        # No summary line; fall back: if luau succeeded, treat as pass.
         if r2.returncode == 0:
-            return True, "ok"
+            return False, f"no test-summary output (silent pass?): stdout='{out.strip()[:80]}'"
         return False, f"failed (rc={r2.returncode}): {out.strip().splitlines()[-1] if out else ''}"
 
 def main():
