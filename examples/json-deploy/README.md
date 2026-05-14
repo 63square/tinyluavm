@@ -149,10 +149,10 @@ See `docs/bytecode-format.md` for the full atom-tag reference.
 
 |                                  | split deploy                          | json deploy (this)                    |
 |----------------------------------|---------------------------------------|---------------------------------------|
-| User-source code that ships      | one file (`tinyvm.luau`, 1997 bytes)  | one file (`tinyvm.luau`, 1997 bytes)  |
+| User-source code that ships      | one file (`tinyvm.luau`, 2472 bytes)  | one file (`tinyvm.luau`, 2472 bytes)  |
 | Macro-VM data format             | Luau module returning `{K, F}`        | JSON string (combined with user)      |
 | User program data format         | Luau module returning `{K, F}`        | JSON string (combined with macro-VM)  |
-| Launcher boilerplate             | ~75 lines                             | ~70 lines + a JSON parser             |
+| Launcher boilerplate             | ~25 lines                             | ~25 lines + a JSON parser             |
 | Source code can be diffed/jq'd?  | partially (Lua syntax)                | yes -- everything                     |
 
 If you want JSON-style transport for all the data tinyvm consumes,
