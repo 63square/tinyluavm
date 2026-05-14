@@ -14,8 +14,9 @@ Good for development. Not what you ship.
 ## 2. Drop in the bundle (single file, ship-ready)
 
 After `python tools/build.py`, copy `build/tinyvm-bundled.luau` into
-your Luau project. It's one ~24 KB file containing the micro-VM and the
-macro-VM bytecode.
+your Luau project. It's a ~28 KB single file containing the micro-VM,
+the pre-decoded macro-VM AST, the op-helper env wrapper, and `tp`/`tu`
+all wired up.
 
 In your code:
 
@@ -31,8 +32,9 @@ local userBytecode = "..."  -- you supply this
 local env = setmetatable({}, {__index = _G})
 env._G = env
 
--- Run. Any return values from the user program's main chunk are returned here.
-local result = play(userBytecode, env, "myscript.luau")
+-- Run. play(...) does not return the user program's return values
+-- (see docs/limitations.md); raised errors still propagate.
+play(userBytecode, env, "myscript.luau")
 ```
 
 The third argument (`"myscript.luau"`) is the chunk label shown in
@@ -40,28 +42,73 @@ The third argument (`"myscript.luau"`) is the chunk label shown in
 
 ## 3. Split deploy (smallest user-facing source)
 
-If size of the Luau source you ship matters more than the size of binary
-data, ship just `src/tinyvm.luau` (4.7 KB) and load the macro-VM bytecode
-through a separate channel:
+If the size of the Luau source you ship matters more than the size of
+the macro-VM data, ship just `src/tinyvm.luau` (1.7 KB) and load the
+predecoded macro-VM AST through a separate channel. The micro-VM
+signature is:
 
 ```lua
-local micro = require("./tinyvm")              -- 4708-byte module
-local macroBytes = loadMacroVMBytecode()       -- you supply this loader
-local result = micro(macroBytes, userBytecode, env, "myscript.luau")
+micro(K, F, E, tp, tu, userBytecode, userEnv, label, ...)
 ```
 
-The "loader" can read from anywhere: a Roblox `ModuleScript`, an
-`HttpService:GetAsync` response, an asset file, a `string` literal you
-generated at build time, etc. Binary data tends to compress better than
-Lua source over the wire, so this split is worth it when transport size
-dominates.
+* `K, F` — the constant pool and function-builder array from
+  `build/macrovm-ast.luau` (a Lua expression, not bytes).
+* `E` — env table the macro-VM uses for its own globals (must include
+  the op helpers `B1`..`B14` and `U1`..`U3`).
+* `tp, tu` — `table.pack` and `table.unpack`.
+* `userBytecode, userEnv, label, ...` — passed through to the macro-VM
+  main closure.
 
-`build/macrovm-module.luau` is a ready-to-use `ModuleScript`-style file
-that returns the macro-VM bytes as a string. You can:
+Concrete example wiring it up yourself:
 
 ```lua
-local macroBytes = require("./macrovm-module")  -- returns the bytes string
+local micro       = require("./tinyvm")              -- the 1713-byte module
+local K, F        = require("./macrovm-ast")         -- the pre-decoded AST
+local tp, tu      = table.pack, table.unpack
+
+local userEnv     = setmetatable({}, {__index = _G})
+userEnv._G        = userEnv
+
+-- Build the shadow env exposing the op helpers; falls through to userEnv.
+local shadowEnv = setmetatable({
+    B1  = function(a, b) return a + b end,
+    B2  = function(a, b) return a - b end,
+    B3  = function(a, b) return a * b end,
+    B4  = function(a, b) return a / b end,
+    B5  = function(a, b) return a // b end,
+    B6  = function(a, b) return a % b end,
+    B7  = function(a, b) return a ^ b end,
+    B8  = function(a, b) return a .. b end,
+    B9  = function(a, b) return a == b end,
+    B10 = function(a, b) return a ~= b end,
+    B11 = function(a, b) return a <  b end,
+    B12 = function(a, b) return a <= b end,
+    B13 = function(a, b) return a >  b end,
+    B14 = function(a, b) return a >= b end,
+    U1  = function(a) return -a end,
+    U2  = function(a) return not a end,
+    U3  = function(a) return #a end,
+}, {__index = userEnv})
+
+local userBytecode = "..."  -- bytes from tools/compiler.py
+
+micro(K, F, shadowEnv, tp, tu, userBytecode, userEnv, "myscript.luau")
 ```
+
+The macro-VM AST is a plain Lua module. Where it lives is up to you:
+
+* As `macrovm-ast.luau` next to your shipped script: `require` it.
+* As a `ModuleScript` in Roblox: `require(script.MacroVMAst)`.
+* As a generated string literal embedded in your code at build time.
+* As a `HttpService:GetAsync` response, an asset, etc.
+
+Note that `macrovm-ast.luau` is ~25 KB of Lua source — larger than
+the bytecode it was decoded from. The trade is: the micro-VM no
+longer needs a runtime bytecode reader (saving ~1.5 KB of micro-VM
+source), and per-function closure setup is baked into the AST itself
+(saving another ~200 bytes). If you'd rather ship the smaller raw
+bytecode and run a reader at load time, see the git history before
+the `experimental-sub2k` branch.
 
 ## Compiling user programs
 
@@ -106,6 +153,11 @@ env.myGameAPI = {
 
 If you want a truly sandboxed environment, set the `__index` metatable
 of `env` to a curated table instead of `_G`.
+
+This is the **user's** env (the 7th argument to the micro-VM, or the
+2nd argument to the bundle's `play(...)`). The micro-VM's 3rd argument
+is the env the macro-VM uses internally — they're different tables.
+The bundle handles this for you.
 
 ## Error handling
 

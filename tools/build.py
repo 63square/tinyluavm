@@ -58,10 +58,13 @@ def main():
     build_macro_bin()
     predecode(rewrite_ops=True, fold_bool=True, force_gfor3=True, split_assign=True)
     micro = (SRC / "tinyvm.luau").read_text(encoding="latin-1").rstrip("\n")
-    ast = (BUILD / "macrovm-ast.luau").read_text(encoding="latin-1")
-    if ast.startswith("--!nocheck\n"): ast = ast[len("--!nocheck\n"):]
-    if ast.startswith("return "):      ast = ast[len("return "):]
-    ast = ast.rstrip("\n")
+    # The AST module is self-contained: it returns a {K, F} table and binds its
+    # own `tp` / `tu` for the baked closures. We inline its body as an IIFE so
+    # the bundle is still a single file.
+    ast_src = (BUILD / "macrovm-ast.luau").read_text(encoding="latin-1")
+    if ast_src.startswith("--!nocheck\n"):
+        ast_src = ast_src[len("--!nocheck\n"):]
+    ast_src = ast_src.rstrip("\n")
     out = BUILD / "tinyvm-bundled.luau"
     # Shadow env wraps the user env so macro-VM globals (string.byte, table.pack,
     # error, etc.) and our op-helpers (B1..B14, U1..U3) resolve correctly while
@@ -71,7 +74,8 @@ def main():
         "local tp,tu=table.pack,table.unpack\n"
         + OP_SETUP +
         "local _mvm=(function()\n" + micro + "\nend)()\n"
-        f"local _K,_F={ast}\n"
+        "local _ast=(function()\n" + ast_src + "\nend)()\n"
+        "local _K,_F=_ast[1],_ast[2]\n"
         "return function(b,e,...) return _mvm(_K,_F,_E(e),tp,tu,b,e,...) end\n",
         encoding="latin-1", newline="",
     )

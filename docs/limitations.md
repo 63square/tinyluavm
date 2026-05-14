@@ -26,6 +26,54 @@ Luau works. These specific things don't, or work with caveats.
 * String interpolation: `` `foo {bar}` `` compiles to a concat chain.
 * `::` cast operator: parsed and discarded.
 
+All of the above are handled by the **macro-VM** when interpreting
+user code. The micro-VM itself has a much smaller atom set — see
+`docs/bytecode-format.md` — but that's invisible at the user-Luau
+level because the macro-VM bridges it.
+
+## Build-time and integration constraints
+
+### The micro-VM cannot run standalone
+
+`src/tinyvm.luau` requires:
+
+* `K` — the constant pool from the predecoded macro-VM AST.
+* `F` — the function-builder array, also from the predecoded AST.
+* `E` — an env that exposes the macro-VM's globals (`string`, `table`,
+  `error`, `setmetatable`, ...) **plus** the op helpers `B1`..`B14`
+  and `U1`..`U3`.
+* `tp`, `tu` — `table.pack` and `table.unpack`.
+* Trailing `...` — forwarded to the macro-VM's main closure.
+
+If you just `require("./tinyvm")` and call it with raw user bytecode,
+nothing happens; the call site has to be wired up to the predecoded
+artifacts. Use `build/tinyvm-bundled.luau` unless you're doing a
+custom integration. See `examples/USAGE.md`.
+
+### The op-helper env
+
+The predecoder rewrites every BinOp/UnOp atom in the macro-VM into a
+Call atom that looks up `B1`..`B14` / `U1`..`U3` in the env. If your
+env doesn't expose them, the macro-VM will fail to run (you'll see
+errors like `attempt to call a nil value` while it's setting up
+constants). The bundle's `_E(u)` helper builds a shadow env exposing
+them on top of your user env.
+
+If you supply your own env wrapping, replicate this:
+
+```lua
+local _E = setmetatable({
+  B1 = function(a, b) return a + b end,
+  B2 = function(a, b) return a - b end,
+  -- ...
+  B14 = function(a, b) return a >= b end,
+  U1 = function(a) return -a end,
+  U2 = function(a) return not a end,
+  U3 = function(a) return #a end,
+}, {__index = your_user_env})
+```
+
+
 ## Things that **don't** work
 
 ### `loadstring` / `load`
@@ -86,9 +134,24 @@ order can differ. Tests that depend on exact order fail.
 
 ### Performance
 
-Tree-walking interpretation is ~50-200× slower than native. Each
+Tree-walking interpretation is ~50–200× slower than native. Each
 arithmetic op in user code involves an `OP_BINOP` atom in the user
 bytecode, which the macro-VM has to dispatch, which itself involves
-multiple atoms in the macro-VM's own bytecode, which the micro-VM
+multiple atoms in the macro-VM's own AST, which the micro-VM
 dispatches. Two levels of tree walking. Don't use this for hot
 inner loops.
+
+Note: the predecoder's BinOp → Call rewrite turns every macro-VM
+arithmetic into an env lookup + function call. This is a small
+performance hit on top of tree-walking; it was a deliberate trade
+to remove the BinOp/UnOp handlers from the micro-VM source.
+
+### Return values from the outer call
+
+The micro-VM's outermost invocation does **not** return the user
+program's return values. That is, if your user program ends with
+`return 42`, the bundle's `play(...)` call returns nothing
+(implicit `nil`). This is a deliberate byte-saving choice in the
+current build. Inner function returns still work normally — closures
+in user code see each other's return values, `pcall` sees errors and
+returns, etc. Only the outermost-of-outermost return is dropped.

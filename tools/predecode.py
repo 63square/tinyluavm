@@ -357,9 +357,17 @@ def main():
         )
         new_F.append(Raw(src))
     F[:] = new_F
-    parts = ["--!nocheck\nreturn "]
+    # Emit as a single-value return so `require("./macrovm-ast")` works.
+    # Consumers (including build.py's bundler) unpack: `local K, F = ast[1], ast[2]`.
+    # The `tp` / `tu` locals make the baked F closures self-contained (they're
+    # upvalues captured at module-load time, not the caller's scope).
+    parts = [
+        "--!nocheck\n",
+        "local tp,tu=table.pack,table.unpack\n",
+        "return {",
+    ]
     emit(K, parts); parts.append(",")
-    emit(F, parts); parts.append("\n")
+    emit(F, parts); parts.append("}\n")
     pathlib.Path(args.output).write_text("".join(parts), encoding="latin-1", newline="")
     print(f"wrote {pathlib.Path(args.output).stat().st_size} bytes")
 
